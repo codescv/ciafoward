@@ -251,6 +251,8 @@ def detect_console_system(
         rom_bytes = strip_snes_smc_header(rom_bytes)
     elif sys_key == "md":
         rom_bytes = deinterleave_smd_if_needed(rom_bytes, ext)
+    elif sys_key == "nes":
+        rom_bytes = _unhack_ffe_mapper6_nes(rom_bytes)
 
     return sys_key, effective_name, rom_bytes
 
@@ -353,6 +355,56 @@ def parse_gb_rom(
     )
 
 
+def _unhack_ffe_mapper6_nes(rom_bytes: bytes) -> bytes:
+    """
+    If `rom_bytes` is a Front Fareast (`[hFFE]`) Super Magic Card Mapper 6 hack of a 128KB PRG + 128KB CHR
+    MMC1 (`Mapper 1`) game (with a 512-byte trainer at $7000..$71FF), restore its standard MMC1 register
+    write subroutines and iNES Mapper 1 header (`PRG=8x16KB, CHR=16x8KB`) so it runs natively on 3DS NES VC.
+    """
+    if len(rom_bytes) != 16 + 512 + 262144 or rom_bytes[:4] != b"NES\x1a":
+        return rom_bytes
+    flags6, flags7 = rom_bytes[6], rom_bytes[7]
+    mapper = (flags6 >> 4) | (flags7 & 0xF0)
+    if mapper != 6 or not (flags6 & 0x04) or rom_bytes[4] != 16 or rom_bytes[5] != 0:
+        return rom_bytes
+
+    prg = bytearray(rom_bytes[16 + 512 : 16 + 512 + 131072])
+    chr_rom = rom_bytes[16 + 512 + 131072 :]
+
+    def _mmc1_write20(addr_hi: int) -> bytes:
+        return bytes([0x8D, 0x00, addr_hi, 0x4A]) * 5
+
+    if prg[130721:130724] == b"\x20\x09\x70" and prg[130759:130762] == b"\x20\x0c\x70":
+        for cpu in (0xB8CB, 0xB902, 0xBDA8, 0xBDC5):
+            off = 16384 + (cpu - 0x8000)
+            if prg[off : off + 3] == b"\x20\xb0\xfe":
+                prg[off : off + 3] = b"\x8d\x01\x20"
+        off_bd6a = 16384 + (0xBD6A - 0x8000)
+        off_bd81 = 16384 + (0xBD81 - 0x8000)
+        prg[off_bd6a : off_bd6a + 23] = _mmc1_write20(0xC0) + b"\x4c\x06\xbf"
+        prg[off_bd81 : off_bd81 + 23] = _mmc1_write20(0xA0) + b"\x4c\x06\xbf"
+        for off in (119306, 119315, 129642):
+            if prg[off : off + 3] == b"\x20\x15\x70":
+                prg[off : off + 3] = b"\x20\xe2\xfe"
+        if prg[129657:129660] == b"\x20\x12\x70":
+            prg[129657:129660] = b"\x20\xbc\xfe"
+        tail = b"\x68\x85\xff\x8d\x00\x20\x60"
+        prg[130721 : 130721 + 27] = _mmc1_write20(0x80) + tail
+        prg[130759 : 130759 + 27] = _mmc1_write20(0xA0) + tail
+        prg[130797 : 130797 + 27] = _mmc1_write20(0xC0) + tail
+        prg[130847 : 130847 + 27] = _mmc1_write20(0xE0) + tail
+        if prg[131048:131051] == b"\x2c\xf1\xff":
+            prg[131048:131051] = b"\xee\xeb\xff"
+
+    new_hdr = bytearray(16)
+    new_hdr[0:4] = b"NES\x1a"
+    new_hdr[4] = 8
+    new_hdr[5] = 16
+    new_hdr[6] = 0x10 | (flags6 & 0x03)
+    new_hdr[7] = 0x00
+    return bytes(new_hdr) + bytes(prg) + chr_rom
+
+
 def convert_ines_to_tnes(rom_bytes: bytes) -> bytes:
     """
     Convert a standard 16-byte iNES (`NES\\x1a`) ROM into Nintendo 3DS Virtual Console's
@@ -362,6 +414,8 @@ def convert_ines_to_tnes(rom_bytes: bytes) -> bytes:
         return rom_bytes
     if len(rom_bytes) < 16 or rom_bytes[:4] != b"NES\x1a":
         raise ValueError("Invalid NES ROM header (expected 'NES\\x1a' or 'TNES')")
+
+    rom_bytes = _unhack_ffe_mapper6_nes(rom_bytes)
 
     prg_16k = rom_bytes[4]
     chr_8k = rom_bytes[5]
@@ -423,11 +477,18 @@ def parse_nes_rom(
         has_battery = bool(rom_bytes[9]) if len(rom_bytes) >= 16 else False
         lookup_crc32 = zlib.crc32(rom_bytes[16:]) & 0xFFFFFFFF if len(rom_bytes) > 16 else crc32
 
-    stem = Path(file_path).stem.split(" (")[0].split(" [")[0].strip()
+    stem_raw = Path(file_path).stem
+    stem = stem_raw.split(" (")[0].split(" [")[0].strip()
     internal_title = stem[:21].upper() or "NES GAME"
     game_code = _derive_code_from_title(internal_title, lookup_crc32, "N")
     title_id = generate_title_id(game_code, lookup_crc32, custom_unique_id=custom_unique_id)
     spec = SYSTEM_SPECS["nes"]
+    if "(J)" in stem_raw or "(Japan)" in stem_raw:
+        region = "Japan"
+    elif "(E)" in stem_raw or "(Europe)" in stem_raw:
+        region = "Europe"
+    else:
+        region = "USA"
 
     return GBARomInfo(
         file_path=file_path,
@@ -450,7 +511,7 @@ def parse_nes_rom(
         save_type_name=f"Nintendo 3DS NES VC (Mapper {mapper}{', Battery SRAM' if has_battery else ''})",
         save_data_size=0x00100000,  # 1 MB for 3DS NES VC
         title_id=title_id,
-        region="USA",
+        region=region,
         system="nes",
         system_name=str(spec["name"]),
         lookup_crc32=lookup_crc32,
