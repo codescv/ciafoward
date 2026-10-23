@@ -102,9 +102,10 @@ def build_smdh(
     if flags is None:
         sys_key = (system or "gba").lower()
         if sys_key == "snes":
-            # New 3DS Exclusive (0x1000) | Disable Save Backup (0x100) | Require EULA (0x80) | Record Usage (0x10) | Allow 3D (0x04) | Visible (0x01)
             flags = 0x00001195
-        elif sys_key in ("gb", "gbc", "nes", "md"):
+        elif sys_key in ("gb", "gbc", "nes"):
+            flags = 0x00000195
+        elif sys_key == "md":
             flags = 0x00000595
         else:
             flags = 0x00000425

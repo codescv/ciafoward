@@ -236,6 +236,9 @@ def build_ncch(
     struct.pack_into("<I", hdr, 0x114, 0x00000000)
     struct.pack_into("<Q", hdr, 0x118, title_id)
 
+    # Logo Region SHA-256 (0x130..0x150) — verified by Process9 FS when logoSize > 0
+    hdr[0x130:0x150] = hashlib.sha256(logo_region_bytes).digest()
+
     clean_serial = "".join(c for c in game_code[:4].upper() if c.isalnum()) or "AGBA"
     product_code = f"{product_prefix}-{clean_serial}".encode("ascii")[:16].ljust(16, b"\x00")
     hdr[0x150:0x160] = product_code
@@ -704,13 +707,20 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
         raise ValueError("Invalid NCCH magic inside Content 0")
     (ncch_units,) = struct.unpack_from("<I", ncch, 0x104)
     (ncch_program_id,) = struct.unpack_from("<Q", ncch, 0x118)
+    ncch_logo_sha = ncch[0x130:0x150]
     product_code = ncch[0x150:0x160].rstrip(b"\x00").decode("ascii", errors="replace")
     ncch_exh_sha = ncch[0x160:0x180]
     ncch_flags = list(ncch[0x188:0x190])
+    logo_offset_mu, logo_size_mu = struct.unpack_from("<II", ncch, 0x198)
     exefs_offset_mu, exefs_size_mu, exefs_hash_mu = struct.unpack_from("<III", ncch, 0x1A0)
     romfs_offset_mu, romfs_size_mu, romfs_hash_mu = struct.unpack_from("<III", ncch, 0x1B0)
     ncch_exefs_super_sha = ncch[0x1C0:0x1E0]
     ncch_romfs_super_sha = ncch[0x1E0:0x200]
+
+    logo_sha_ok = True
+    if logo_offset_mu > 0 and logo_size_mu > 0:
+        logo_slice = ncch[logo_offset_mu * MEDIA_UNIT : (logo_offset_mu + logo_size_mu) * MEDIA_UNIT]
+        logo_sha_ok = ncch_logo_sha == hashlib.sha256(logo_slice).digest()
 
     exheader = ncch[0x200:0xA00]
     computed_exh_sha = hashlib.sha256(exheader[:0x400]).digest()
@@ -874,6 +884,7 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
         and info_sha == computed_info_sha
         and super_sha == computed_super_sha
         and ncch_exh_sha == computed_exh_sha
+        and logo_sha_ok
         and ncch_exefs_super_sha == computed_exefs_super_sha
         and romfs_hash_ok
         and romfs_ivfc_ok
