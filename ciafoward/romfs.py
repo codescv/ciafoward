@@ -84,11 +84,26 @@ def build_romfs(files: Dict[str, bytes]) -> bytes:
             parent_idx = dir_map[cur_path]
         return parent_idx
 
-    for raw_path, data in sorted(files.items()):
+    all_dir_parts: Dict[str, List[str]] = {}
+    cleaned_files: List[Tuple[List[str], bytes]] = []
+    for raw_path, data in files.items():
         clean = raw_path.strip("/").replace("\\", "/")
         if not clean:
             continue
         parts = [p for p in clean.split("/") if p]
+        cleaned_files.append((parts, data))
+        for depth in range(1, len(parts)):
+            sub = parts[:depth]
+            all_dir_parts["/".join(sub)] = sub
+
+    for _, d_parts in sorted(
+        all_dir_parts.items(), key=lambda kv: (len(kv[1]), [p.upper() for p in kv[1]])
+    ):
+        ensure_dir(d_parts)
+
+    for parts, data in sorted(
+        cleaned_files, key=lambda item: [p.upper() for p in item[0]]
+    ):
         d_idx = ensure_dir(parts[:-1])
         dirs[d_idx]["files"].append((parts[-1], data))
 

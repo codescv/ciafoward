@@ -207,7 +207,21 @@ def build_ncch(
 
     ncch_header_size = 0x200
     exheader_total_size = 0x800
-    exefs_offset_bytes = ncch_header_size + exheader_total_size  # 0xA00
+    logo_region_bytes = pad_bytes(get_logo_bytes(), MEDIA_UNIT)  # 0x2000 bytes (16 MU)
+    plain_strings = (
+        b"[SDK+NINTENDO:CTR_SDK-11_4_0_200_none]\x00"
+        b"[SDK+NINTENDO:Firmware-02_50_8]\x00"
+        b"[SDK+NINTENDO:ExtraPad]\x00"
+        b"[SDK+NINTENDO:NW4C_3_7_4_fnt1]\x00"
+        b"[SDK+NINTENDO:NW4C_3_7_4_lyt1]\x00"
+        b"[SDK+NINTENDO:NW4C_3_7_4_snd]\x00"
+        b"[SDK+NINTENDO:Ir]\x00"
+    )
+    plain_region_bytes = plain_strings.ljust(MEDIA_UNIT, b"\x00")[:MEDIA_UNIT]  # 0x200 bytes (1 MU)
+
+    logo_offset_bytes = ncch_header_size + exheader_total_size  # 0xA00 (MU 5)
+    plain_offset_bytes = logo_offset_bytes + len(logo_region_bytes)  # 0x2A00 (MU 21)
+    exefs_offset_bytes = plain_offset_bytes + len(plain_region_bytes)  # 0x2C00 (MU 22)
     after_exefs = exefs_offset_bytes + len(exefs_bytes)
     romfs_offset_bytes = align_up(after_exefs, 0x1000)
     exefs_to_romfs_pad = b"\x00" * (romfs_offset_bytes - after_exefs)
@@ -238,8 +252,9 @@ def build_ncch(
     hdr[0x188 + 6] = 0x00  # Media Unit Size: 0 => 0x200 bytes
     hdr[0x188 + 7] = 0x04  # BitFlags: 0x04 = NoCrypto
 
-    # Plain & Logo regions (0 because logo is inside ExeFS)
-    hdr[0x190:0x1A0] = b"\x00" * 16
+    # PlainRegion (SDK/ExtraPad/Ir declarations) & LogoRegion
+    struct.pack_into("<II", hdr, 0x190, plain_offset_bytes // MEDIA_UNIT, len(plain_region_bytes) // MEDIA_UNIT)
+    struct.pack_into("<II", hdr, 0x198, logo_offset_bytes // MEDIA_UNIT, len(logo_region_bytes) // MEDIA_UNIT)
 
     # ExeFS Offset, Size, Hash Region Size (in media units)
     struct.pack_into("<I", hdr, 0x1A0, exefs_offset_bytes // MEDIA_UNIT)
@@ -258,7 +273,15 @@ def build_ncch(
     # RomFS Superblock SHA-256 (first 0x200 bytes of RomFS)
     hdr[0x1E0:0x200] = hashlib.sha256(romfs_bytes[:MEDIA_UNIT]).digest()
 
-    return bytes(hdr + exheader_bytes + exefs_bytes + exefs_to_romfs_pad + romfs_bytes)
+    return bytes(
+        hdr
+        + exheader_bytes
+        + logo_region_bytes
+        + plain_region_bytes
+        + exefs_bytes
+        + exefs_to_romfs_pad
+        + romfs_bytes
+    )
 
 
 def build_cert_chain() -> bytes:
@@ -314,8 +337,50 @@ def build_cia_meta(exheader_bytes: bytes, smdh_bytes: bytes) -> bytes:
     meta[0x000:0x180] = exheader_bytes[0x040:0x1C0]
     (core_ver,) = struct.unpack_from("<I", exheader_bytes, 0x208) if len(exheader_bytes) >= 0x20C else (0x00000202,)
     struct.pack_into("<I", meta, 0x180, core_ver)
+    struct.pack_into("<I", meta, 0x300, core_ver)
     meta[0x400:0x3AC0] = smdh_bytes[:0x36C0]
     return bytes(meta)
+
+
+def patch_md_code_for_2x_rgui(code_bytes: bytes) -> bytes:
+    """
+    Patch the PicoDrive 3DS RetroArch 1.3.2 `.code` binary so the bottom-screen RGUI menu:
+      - Renders into a `200x120` framebuffer (instead of `320x240`) with `4px` margins and `9` items/page
+      - Scales by an exact `2x` integer factor (`200x120 -> 400x240`) using `GPU_NEAREST` point sampling
+        (instead of blurry `GPU_LINEAR` bilinear filtering)
+      - Uses a clean solid dark slate background (`0x222E`) instead of a noisy 2x2 dithered checkerboard
+      - Defaults to `"rgui"` even if `retroarch.cfg` is missing
+    """
+    buf = bytearray(code_bytes)
+    patches = (
+        (0x02EBC0, 0xE3A02D05, 0xE3A020C8),  # rgui_init: fb_width = 200
+        (0x02EBC4, 0xE3A07D0A, 0xE3A07F64),  # rgui_init: fb_pitch = 400
+        (0x02EBD0, 0xE3A0E0F0, 0xE3A0E078),  # rgui_init: fb_height = 120
+        (0x02EC44, 0xE3A030F0, 0xE3A03000),  # rgui_init: rgui->last_height = 0
+        (0x0C69E0, 0xE2033001, 0xE3A03000),  # rgui_render: solid dark background (no 2x2 checkerboard)
+        (0x0C69F4, 0xE383300C, 0xE383300E),  # rgui_render: panel alpha = 0xE (0x222E)
+        (0x0C6A88, 0xE1A03223, 0xE3A03004),  # rgui_render: term_start_x = 4
+        (0x0C6A90, 0xE1A080A8, 0xE3A08010),  # rgui_render: term_start_y = 16
+        (0x0C7000, 0xE1A03223, 0xE3A03004),  # rgui_render (fallback): term_start_x = 4
+        (0x0C700C, 0xE1A080A8, 0xE3A08010),  # rgui_render (fallback): term_start_y = 16
+        (0x0097C4, 0xE08220A1, 0xE3A02040),  # rgui_navigation: term_start_x << 4
+        (0x0097C8, 0xE04330AE, 0xE2433010),  # rgui_navigation: height - term_start_y
+        (0x020BDC, 0xE26B2E19, 0xE3A02000),  # ctr_set_texture_frame: x0 = 0
+        (0x020BE4, 0xE1A020A2, 0xE3A02000),  # ctr_set_texture_frame: x0 = 0
+        (0x020BE8, 0xE26830F0, 0xE3A03000),  # ctr_set_texture_frame: y0 = 0
+        (0x020BEC, 0xE1A030A3, 0xE3A03000),  # ctr_set_texture_frame: y0 = 0
+        (0x020BF0, 0xE082100B, 0xE1A0108B),  # ctr_set_texture_frame: x1 = width * 2 = 400
+        (0x020BF8, 0xE0831008, 0xE1A01088),  # ctr_set_texture_frame: y1 = height * 2 = 240
+        (0x051F14, 0xE3A03006, 0xE3A03000),  # ctr_frame: menu GPUREG_TEXUNIT0_PARAM = GPU_NEAREST
+        (0x06BFBC, 0x00312814, 0x00346D2C),  # config_get_default_menu: "rgui"
+        (0x0E5444, 0x00312814, 0x00346D2C),  # config_set_defaults: "rgui"
+    )
+    for offset, expected_orig, new_val in patches:
+        if offset + 4 <= len(buf):
+            (cur_val,) = struct.unpack_from("<I", buf, offset)
+            if cur_val == expected_orig:
+                struct.pack_into("<I", buf, offset, new_val)
+    return bytes(buf)
 
 
 def build_cia(
@@ -405,6 +470,7 @@ def package_gba_to_cia(
         publisher=metadata.publisher,
         icon_24x24=icon_24,
         icon_48x48=icon_48,
+        system=rom_info.system,
     )
 
     # 2. Build CBMD Banner
@@ -494,6 +560,7 @@ def package_gba_to_cia(
             romfs_files["KTR-UAEE.icn"] = smdh_bytes
             code_src = "official-3ds-snes-vc"
         elif sys_key == "md":
+            code_bytes = patch_md_code_for_2x_rgui(code_bytes)
             slug = (
                 "".join(c.lower() if c.isalnum() else "_" for c in metadata.short_title).strip("_")[:32]
                 or "game"
@@ -501,9 +568,21 @@ def package_gba_to_cia(
             uid_hex = f"{(rom_info.title_id >> 8) & 0xFFFFF:05x}"
             internal_name = f"gen_{uid_hex}_{slug}"
             if "retroarch.cfg" in romfs_files:
-                romfs_files["retroarch.cfg"] = romfs_files["retroarch.cfg"].replace(
-                    b"gen_100ee_mortal_kombat", internal_name.encode("ascii")
+                cfg_bytes = romfs_files["retroarch.cfg"]
+                cfg_bytes = cfg_bytes.replace(b"gen_100ee_mortal_kombat", internal_name.encode("ascii"))
+                cfg_bytes = cfg_bytes.replace(b"nsui_formwarders_data", b"nsui_forwarders_data")
+                cfg_bytes = cfg_bytes.replace(b'menu_linear_filter = "true"', b'menu_linear_filter = "false"')
+                cfg_bytes = cfg_bytes.replace(b'menu_timedate_enable = "true"', b'menu_timedate_enable = "false"')
+                cfg_bytes = cfg_bytes.replace(
+                    b'menu_entry_normal_color = "ff999999"', b'menu_entry_normal_color = "ffeeeeee"'
                 )
+                cfg_bytes = cfg_bytes.replace(
+                    b'menu_entry_hover_color = "ffffffff"', b'menu_entry_hover_color = "ffffd700"'
+                )
+                cfg_bytes = cfg_bytes.replace(
+                    b'menu_title_color = "ffffffff"', b'menu_title_color = "ff00ffff"'
+                )
+                romfs_files["retroarch.cfg"] = cfg_bytes
             romfs_files["internal_name.txt"] = internal_name.encode("ascii")
             romfs_files["rom_path.txt"] = b"romfs:/rom.md"
             romfs_files["rom.md"] = rom_bytes
