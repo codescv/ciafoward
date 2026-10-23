@@ -282,8 +282,15 @@ def candidate_nointro_names(
     if clean_stem:
         add(f"{clean_stem} ({rom_info.region})")
         add(f"{clean_stem} (USA)")
+        add(f"{clean_stem} (Japan)")
         add(f"{clean_stem} (USA, Europe)")
+        add(f"{clean_stem} (World)")
         add(clean_stem)
+        # Also try hyphenated Japanese suffixes (e.g. 'Dodgeball Bu' -> 'Dodgeball-bu')
+        hyph_stem = re.sub(r"\s+(Bu|Kun|Hen|Den)\b", lambda m: "-" + m.group(1).lower(), clean_stem)
+        if hyph_stem != clean_stem:
+            add(f"{hyph_stem} ({rom_info.region})")
+            add(f"{hyph_stem} (Japan)")
 
     if rom_info.internal_title:
         title_cased = rom_info.internal_title.title()
