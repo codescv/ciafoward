@@ -21,6 +21,14 @@ from .banner import (
     decompress_lz11,
     parse_smdh,
 )
+from .consoles import (
+    build_snes_vc_data_bin,
+    convert_ines_to_tnes,
+    parse_gb_rom,
+    parse_md_rom,
+    parse_nes_rom,
+    parse_snes_rom,
+)
 from .gba import SAVE_TYPE_NAMES, GBARomInfo, SaveTypeID, parse_gba_rom
 from .graphics import (
     RGBAImage,
@@ -30,11 +38,14 @@ from .graphics import (
     load_image_file,
 )
 from .metadata import GameMetadata
+from .romfs import build_romfs, extract_romfs, verify_romfs_ivfc
 from .templates import (
+    build_console_exheader,
     build_gbavc_exheader,
     get_banner_cgfx_header,
     get_cert_chain,
     get_config_block_template,
+    get_console_template,
     get_logo_bytes,
     get_ncch_header_template,
     get_romfs_bytes,
@@ -179,9 +190,10 @@ def build_ncch(
     exefs_bytes: bytes,
     romfs_bytes: Optional[bytes] = None,
     maker_code: str = "01",
+    product_prefix: str = "CTR-P",
 ) -> bytes:
     """
-    Build an unencrypted (`NoCrypto`) 3DS NCCH (`.cxi` / Content 0) container for GBA VC,
+    Build an unencrypted (`NoCrypto`) 3DS NCCH (`.cxi` / Content 0) container,
     including the signed NCCH header template, signed ExHeader, ExeFS, and 0x1000-aligned RomFS.
     """
     if len(exheader_bytes) != 0x800:
@@ -211,7 +223,7 @@ def build_ncch(
     struct.pack_into("<Q", hdr, 0x118, title_id)
 
     clean_serial = "".join(c for c in game_code[:4].upper() if c.isalnum()) or "AGBA"
-    product_code = f"CTR-P-{clean_serial}".encode("ascii")[:16].ljust(16, b"\x00")
+    product_code = f"{product_prefix}-{clean_serial}".encode("ascii")[:16].ljust(16, b"\x00")
     hdr[0x150:0x160] = product_code
 
     # SHA-256 of first 0x400 bytes of ExHeader (SCI + ACI)
@@ -300,7 +312,8 @@ def build_cia_meta(exheader_bytes: bytes, smdh_bytes: bytes) -> bytes:
     """Build the 0x3AC0-byte CIA Meta section (used by FBI/installer for preview)."""
     meta = bytearray(0x3AC0)
     meta[0x000:0x180] = exheader_bytes[0x040:0x1C0]
-    struct.pack_into("<I", meta, 0x180, 0x00000202)  # CoreVersion = 0x202 (AGB_FIRM)
+    (core_ver,) = struct.unpack_from("<I", exheader_bytes, 0x208) if len(exheader_bytes) >= 0x20C else (0x00000202,)
+    struct.pack_into("<I", meta, 0x180, core_ver)
     meta[0x400:0x3AC0] = smdh_bytes[:0x36C0]
     return bytes(meta)
 
@@ -423,6 +436,7 @@ def package_gba_to_cia(
         screen_img=screen_img,
         short_title=metadata.short_title,
         subtitle=subtitle,
+        system=rom_info.system,
     )
 
     # Optional preview PNG export
@@ -440,16 +454,72 @@ def package_gba_to_cia(
         preview_banner_png = str(b_path)
         preview_icon_png = str(i_path)
 
-    # 3. Build ExeFS `.code` with 0x360-byte .CAA footer
-    code_bytes, rom_offset, padded_rom_size = build_gbavc_code_section(
-        rom_bytes=rom_bytes,
-        save_type_id=rom_info.save_type_id,
-        ghosting=ghosting,
-        dark_filter=dark_filter,
-    )
-    code_src = "native-agb-firm-0x360"
+    sys_key = (rom_info.system or "gba").lower()
+    if sys_key == "gba":
+        # 3a. GBA: Native AGB_FIRM `.code` with 0x360-byte .CAA footer & empty 0x1000 RomFS
+        code_bytes, rom_offset, padded_rom_size = build_gbavc_code_section(
+            rom_bytes=rom_bytes,
+            save_type_id=rom_info.save_type_id,
+            ghosting=ghosting,
+            dark_filter=dark_filter,
+        )
+        code_src = "native-agb-firm-0x360"
+        exheader_bytes = build_gbavc_exheader(
+            title_id=rom_info.title_id,
+            save_data_size=rom_info.save_data_size,
+            game_code=rom_info.game_code,
+        )
+        romfs_bytes = get_romfs_bytes()
+    else:
+        # 3b. Multi-Console (GB, GBC, NES, SNES, Genesis): Official 3DS VC or PicoDrive Forwarder
+        tpl = get_console_template(sys_key)
+        code_bytes = tpl["code"]
+        rom_offset = 0
+        padded_rom_size = len(rom_bytes)
+        romfs_files: Dict[str, bytes] = dict(tpl["romfs_files"])
 
-    # 4. Build ExeFS (.code, banner, icon, logo), ExHeader, NCCH (with RomFS), and CIA
+        if sys_key in ("gb", "gbc"):
+            romfs_files["rom/rom.bin"] = rom_bytes
+            code_src = f"official-3ds-{sys_key}-vc"
+        elif sys_key == "nes":
+            romfs_files["rom/rom.bin"] = convert_ines_to_tnes(rom_bytes)
+            code_src = "official-3ds-nes-vc"
+        elif sys_key == "snes":
+            is_hirom = "HiROM" in rom_info.sdk_save_strings
+            romfs_files["data.bin"] = build_snes_vc_data_bin(
+                rom_bytes,
+                tpl["extra"]["snes_data_hdr"],
+                is_hirom=is_hirom,
+            )
+            romfs_files["KTR-UAEE.icn"] = smdh_bytes
+            code_src = "official-3ds-snes-vc"
+        elif sys_key == "md":
+            slug = (
+                "".join(c.lower() if c.isalnum() else "_" for c in metadata.short_title).strip("_")[:32]
+                or "game"
+            )
+            uid_hex = f"{(rom_info.title_id >> 8) & 0xFFFFF:05x}"
+            internal_name = f"gen_{uid_hex}_{slug}"
+            if "retroarch.cfg" in romfs_files:
+                romfs_files["retroarch.cfg"] = romfs_files["retroarch.cfg"].replace(
+                    b"gen_100ee_mortal_kombat", internal_name.encode("ascii")
+                )
+            romfs_files["internal_name.txt"] = internal_name.encode("ascii")
+            romfs_files["rom_path.txt"] = b"romfs:/rom.md"
+            romfs_files["rom.md"] = rom_bytes
+            code_src = "picodrive-3ds-forwarder"
+        else:
+            raise ValueError(f"Unsupported console system: {sys_key}")
+
+        romfs_bytes = build_romfs(romfs_files)
+        exheader_bytes = build_console_exheader(
+            system=sys_key,
+            title_id=rom_info.title_id,
+            save_data_size=rom_info.save_data_size,
+            template_bytes=tpl["exheader"],
+        )
+
+    # 4. Build ExeFS (.code, banner, icon, logo), NCCH (with RomFS), and CIA
     logo_bytes = get_logo_bytes()
     exefs_bytes = build_exefs(
         [
@@ -460,13 +530,6 @@ def package_gba_to_cia(
         ]
     )
 
-    exheader_bytes = build_gbavc_exheader(
-        title_id=rom_info.title_id,
-        save_data_size=rom_info.save_data_size,
-        game_code=rom_info.game_code,
-    )
-
-    romfs_bytes = get_romfs_bytes()
     ncch_bytes = build_ncch(
         title_id=rom_info.title_id,
         game_code=rom_info.game_code,
@@ -474,6 +537,7 @@ def package_gba_to_cia(
         exefs_bytes=exefs_bytes,
         romfs_bytes=romfs_bytes,
         maker_code=rom_info.maker_code,
+        product_prefix=rom_info.product_prefix,
     )
 
     cia_bytes = build_cia(
@@ -586,10 +650,25 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
     computed_exefs_super_sha = hashlib.sha256(exefs[: exefs_hash_mu * MEDIA_UNIT]).digest()
 
     romfs_hash_ok = True
+    romfs_ivfc_ok = True
+    romfs_files_summary: Dict[str, int] = {}
     if romfs_offset_mu > 0 and romfs_size_mu > 0:
         romfs_off = romfs_offset_mu * MEDIA_UNIT
+        romfs_len = romfs_size_mu * MEDIA_UNIT
         romfs_hash_len = romfs_hash_mu * MEDIA_UNIT
-        romfs_hash_ok = ncch_romfs_super_sha == hashlib.sha256(ncch[romfs_off : romfs_off + romfs_hash_len]).digest()
+        romfs_blob = ncch[romfs_off : romfs_off + romfs_len]
+        romfs_hash_ok = ncch_romfs_super_sha == hashlib.sha256(romfs_blob[:romfs_hash_len]).digest()
+        if len(romfs_blob) >= 0x4000:
+            romfs_ivfc_ok = verify_romfs_ivfc(romfs_blob)
+            try:
+                extracted_romfs = extract_romfs(romfs_blob)
+                romfs_files_summary = {k: len(v) for k, v in extracted_romfs.items()}
+            except Exception:
+                extracted_romfs = {}
+        else:
+            extracted_romfs = {}
+    else:
+        extracted_romfs = {}
 
     exefs_files: Dict[str, Dict[str, Any]] = {}
     raw_exefs_blobs: Dict[str, bytes] = {}
@@ -677,6 +756,39 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
                 "cwav_magic_ok": cwav_blob[:4] == b"CWAV",
             }
 
+    # Detect console system & embedded ROM for non-GBA systems
+    detected_system = "gba"
+    if aci_core_version == 0x00000202 or caa_info.get("magic_ok"):
+        detected_system = "gba"
+    elif "rom.md" in extracted_romfs:
+        detected_system = "md"
+        if embedded_gba_info is None:
+            try:
+                embedded_gba_info = parse_md_rom("<embedded_in_cia>", extracted_romfs["rom.md"])
+            except Exception:
+                pass
+    elif "data.bin" in extracted_romfs:
+        detected_system = "snes"
+        if embedded_gba_info is None and len(extracted_romfs["data.bin"]) > 0x60:
+            try:
+                embedded_gba_info = parse_snes_rom("<embedded_in_cia>", extracted_romfs["data.bin"][0x60:])
+            except Exception:
+                pass
+    elif "rom/rom.bin" in extracted_romfs:
+        rom_bin = extracted_romfs["rom/rom.bin"]
+        if rom_bin[:4] in (b"TNES", b"NES\x1a"):
+            detected_system = "nes"
+            try:
+                embedded_gba_info = parse_nes_rom("<embedded_in_cia>", rom_bin)
+            except Exception:
+                pass
+        else:
+            detected_system = "gbc" if product_code.startswith("GBC-") or "dmg_cgb" in extracted_romfs else "gb"
+            try:
+                embedded_gba_info = parse_gb_rom("<embedded_in_cia>", rom_bin, system=detected_system)
+            except Exception:
+                pass
+
     all_hashes_ok = (
         cert_chain_ok
         and chunk_sha == computed_ncch_sha
@@ -685,23 +797,35 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
         and ncch_exh_sha == computed_exh_sha
         and ncch_exefs_super_sha == computed_exefs_super_sha
         and romfs_hash_ok
+        and romfs_ivfc_ok
         and all(v["sha256_ok"] for v in exefs_files.values())
     )
-    agb_firm_ready = (
-        all_hashes_ok
-        and aci_core_version == 0x00000202
-        and (sci_flags & 0x03) == 0x02  # SDApplication=1, CompressExefsCode=0
-        and tmd_save_size == exh_save_size
-        and caa_info.get("magic_ok", False)
-        and caa_info.get("rom_offset") == 0
-        and "logo" in exefs_files
-    )
+    if detected_system == "gba":
+        agb_firm_ready = (
+            all_hashes_ok
+            and aci_core_version == 0x00000202
+            and (sci_flags & 0x03) == 0x02  # SDApplication=1, CompressExefsCode=0
+            and tmd_save_size == exh_save_size
+            and caa_info.get("magic_ok", False)
+            and caa_info.get("rom_offset") == 0
+            and "logo" in exefs_files
+        )
+    else:
+        agb_firm_ready = (
+            all_hashes_ok
+            and aci_core_version == 0x00000002
+            and tmd_save_size == exh_save_size
+            and "logo" in exefs_files
+            and len(romfs_files_summary) > 0
+        )
 
     return {
         "file_path": str(Path(cia_path).expanduser().resolve()),
         "file_size": len(data),
+        "system": detected_system,
         "cert_chain_valid": cert_chain_ok,
         "all_hashes_valid": all_hashes_ok,
+        "romfs_ivfc_valid": romfs_ivfc_ok,
         "agb_firm_ready": agb_firm_ready,
         "title_id": f"{tmd_title_id:016X}",
         "ticket_title_id": f"{tik_title_id:016X}",
@@ -712,6 +836,7 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
         "save_data_size": tmd_save_size,
         "ncch_flags": [f"0x{b:02X}" for b in ncch_flags],
         "exefs_files": exefs_files,
+        "romfs_files": romfs_files_summary,
         "caa_footer": caa_info,
         "smdh": smdh_info,
         "banner": banner_info,

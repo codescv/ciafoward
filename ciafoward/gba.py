@@ -175,10 +175,19 @@ class GBARomInfo:
     save_data_size: int
     title_id: int
     region: str
+    system: str = "gba"
+    system_name: str = "Game Boy Advance"
+    lookup_crc32: int = 0
+    product_prefix: str = "CTR-P"
+    core_version: int = 0x00000202
 
     @property
     def crc32_hex(self) -> str:
         return f"{self.crc32:08X}"
+
+    @property
+    def lookup_crc32_hex(self) -> str:
+        return f"{(self.lookup_crc32 or self.crc32):08X}"
 
     @property
     def title_id_hex(self) -> str:
@@ -187,7 +196,7 @@ class GBARomInfo:
     @property
     def product_code(self) -> str:
         serial = "".join(c for c in self.game_code[:4].upper() if c.isalnum()) or "AGBA"
-        return f"CTR-P-{serial}"
+        return f"{self.product_prefix}-{serial}"
 
 
 def next_power_of_two_rom_size(size: int) -> int:

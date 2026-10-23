@@ -1,5 +1,5 @@
 """
-ciafoward - GBA to Nintendo 3DS Virtual Console (AGB_FIRM) CIA Packager.
+ciafoward - Multi-Console (GBA / GB / GBC / NES / SNES / Genesis) to Nintendo 3DS Virtual Console CIA Packager.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

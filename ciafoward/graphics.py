@@ -581,25 +581,36 @@ def draw_text(
     return cur_x - x
 
 
+CONSOLE_THEMES: Dict[str, Tuple[str, str, RGB, RGB, RGBA]] = {
+    "gba": ("GAME BOY ADVANCE", "AGB", (28, 32, 85), (48, 60, 150), (78, 96, 196, 255)),
+    "gb": ("GAME BOY", "DMG", (38, 48, 32), (68, 86, 52), (96, 122, 68, 255)),
+    "gbc": ("GAME BOY COLOR", "CGB", (45, 24, 72), (82, 42, 135), (128, 68, 196, 255)),
+    "nes": ("NINTENDO ENT. SYSTEM", "NES", (62, 22, 26), (115, 34, 42), (188, 46, 56, 255)),
+    "snes": ("SUPER NINTENDO", "SNS", (42, 36, 78), (76, 65, 142), (112, 92, 196, 255)),
+    "md": ("SEGA GENESIS", "GEN", (18, 28, 56), (32, 54, 118), (44, 92, 196, 255)),
+}
+
+
 def generate_stylized_cover(meta: GameMetadata, width: int = 240, height: int = 160) -> RGBAImage:
     """
-    Generate a clean, stylized GBA cartridge/screen cover image when offline or no boxart is found.
+    Generate a clean, stylized cartridge/screen cover image when offline or no boxart is found.
     """
+    sys_key = getattr(meta, "system", "gba") or "gba"
+    label, _, c_bot, c_top, pill_col = CONSOLE_THEMES.get(sys_key, CONSOLE_THEMES["gba"])
     img = RGBAImage(width, height)
-    # Deep indigo GBA gradient background
     for y in range(height):
         t = y / max(1, height - 1)
-        r = int(28 + 20 * (1.0 - t))
-        g = int(32 + 28 * (1.0 - t))
-        b = int(85 + 65 * (1.0 - t))
+        r = int(c_bot[0] + (c_top[0] - c_bot[0]) * (1.0 - t))
+        g = int(c_bot[1] + (c_top[1] - c_bot[1]) * (1.0 - t))
+        b = int(c_bot[2] + (c_top[2] - c_bot[2]) * (1.0 - t))
         row = y * width
         for x in range(width):
             img.pixels[row + x] = (r, g, b, 255)
 
     # Top header bar
-    fill_rect(img, 0, 0, width, 26, (18, 20, 48, 255))
-    fill_rect(img, 0, 26, width, 2, (110, 140, 255, 255))
-    draw_text(img, "GAME BOY ADVANCE", 10, 9, (190, 210, 255, 255), scale=1)
+    fill_rect(img, 0, 0, width, 26, (18, 20, 38, 255))
+    fill_rect(img, 0, 26, width, 2, pill_col)
+    draw_text(img, label, 10, 9, (210, 225, 255, 255), scale=1)
 
     # Wrap and render title
     words = meta.short_title.split()
@@ -742,12 +753,14 @@ def compose_vc_banner_256x128(
         right_x = 134
 
     max_text_w = 256 - right_x - 8
+    sys_key = getattr(meta, "system", "gba") or "gba"
+    sys_label, sys_prefix, _, _, pill_col = CONSOLE_THEMES.get(sys_key, CONSOLE_THEMES["gba"])
 
-    # Right side: "VIRTUAL CONSOLE" & "GAME BOY ADVANCE" pill badge
-    fill_rect(canvas, right_x, 14, max_text_w, 13, (78, 96, 196, 255))
+    # Right side: Console pill badge
+    fill_rect(canvas, right_x, 14, max_text_w, 13, pill_col)
     draw_text(
         canvas,
-        "GAME BOY ADVANCE",
+        sys_label,
         right_x + 4,
         17,
         (255, 255, 255, 255),
@@ -805,7 +818,7 @@ def compose_vc_banner_256x128(
     )
     draw_text(
         canvas,
-        f"AGB-{meta.game_code.upper()}",
+        f"{sys_prefix}-{meta.game_code.upper()}",
         right_x,
         div_y + 31,
         (255, 215, 95, 255),

@@ -17,6 +17,7 @@ from .cia import (
     package_gba_to_cia,
     verify_and_inspect_cia,
 )
+from .consoles import parse_rom_auto
 from .gba import GBARomInfo, apply_ips_patch, parse_gba_rom
 from .metadata import resolve_game_metadata
 from .save_tool import convert_save_for_3ds
@@ -36,8 +37,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ciafoward",
         description=(
-            "将 GBA 游戏 (.gba) 打包为 Nintendo 3DS 原生硬件模式 (AGB_FIRM Virtual Console) "
-            "可安装的 .cia 格式，支持自动识别存档类型、自动下载封面与游戏元数据。"
+            "将多平台经典游戏 (GBA / GB / GBC / NES / SNES / Sega Genesis / .zip) 打包为 "
+            "Nintendo 3DS Virtual Console / Forwarder 可安装的 .cia 格式，支持自动识别存档类型、自动下载封面与游戏元数据。"
         ),
     )
     parser.add_argument(
@@ -46,16 +47,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # 1. `build` subcommand (also default when given a .gba file directly)
+    # 1. `build` subcommand (also default when given a ROM file directly)
     build_p = subparsers.add_parser(
         "build",
-        help="将 .gba 游戏打包为 3DS Virtual Console .cia 安装包 (默认命令)",
+        help="将游戏 ROM (.gba/.gb/.gbc/.nes/.sfc/.smc/.md/.gen/.zip) 打包为 3DS .cia 安装包 (默认命令)",
     )
-    build_p.add_argument("input", help="输入的 GBA ROM 文件路径 (.gba)")
+    build_p.add_argument(
+        "input",
+        help="输入的游戏 ROM 文件路径 (.gba, .gb, .gbc, .nes, .sfc, .smc, .md, .gen, .smd, .zip)",
+    )
     build_p.add_argument(
         "-o",
         "--output",
-        help="输出的 CIA 文件路径 (默认输出到输入文件同目录或当前目录下的 <游戏名>.cia)",
+        help="输出的 CIA 文件路径 (默认输出到当前目录下的 <游戏名>.cia)",
+    )
+    build_p.add_argument(
+        "--system",
+        default="auto",
+        choices=["auto", "gba", "gb", "gbc", "nes", "snes", "md"],
+        help="指定主机平台类型 (默认: auto 自动根据扩展名与 ROM 魔数识别)",
     )
     build_p.add_argument("--title", help="自定义游戏显示名称 (Short & Long Title)")
     build_p.add_argument("--publisher", help="自定义发行商名称 (例如 Nintendo)")
@@ -186,7 +196,7 @@ def _parse_unique_id(val: Optional[str]) -> Optional[int]:
 def cmd_build(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser().resolve()
     if not input_path.is_file():
-        print(f"[错误] 找不到输入的 GBA 文件: {input_path}", file=sys.stderr)
+        print(f"[错误] 找不到输入的 ROM 文件: {input_path}", file=sys.stderr)
         return 1
 
     if args.base_cia:
@@ -194,41 +204,52 @@ def cmd_build(args: argparse.Namespace) -> int:
         if not args.json:
             print(f"[*] 已从基准 CIA 提取模板: {saved}")
 
-    rom_bytes = input_path.read_bytes()
+    raw_input_bytes = input_path.read_bytes()
+    force_sys = None if getattr(args, "system", "auto") == "auto" else args.system
+    custom_uid = _parse_unique_id(args.title_id)
+
+    rom_info, rom_bytes = parse_rom_auto(
+        file_path=str(input_path),
+        rom_bytes=raw_input_bytes,
+        override_save_type=args.save_type,
+        override_rtc=args.rtc,
+        custom_unique_id=custom_uid,
+        force_system=force_sys,
+    )
+
     if args.ips:
         ips_path = Path(args.ips).expanduser().resolve()
         if not ips_path.is_file():
             print(f"[错误] 找不到 IPS 补丁文件: {ips_path}", file=sys.stderr)
             return 1
         rom_bytes = apply_ips_patch(rom_bytes, ips_path.read_bytes())
+        rom_info, rom_bytes = parse_rom_auto(
+            file_path=rom_info.file_path,
+            rom_bytes=rom_bytes,
+            override_save_type=args.save_type,
+            override_rtc=args.rtc,
+            custom_unique_id=custom_uid,
+            force_system=rom_info.system,
+        )
         if not args.json:
             print(f"[*] 已应用 IPS 补丁: {ips_path.name}")
 
-    custom_uid = _parse_unique_id(args.title_id)
-    rom_info = parse_gba_rom(
-        file_path=str(input_path),
-        rom_bytes=rom_bytes,
-        override_save_type=args.save_type,
-        override_rtc=args.rtc,
-        custom_unique_id=custom_uid,
-    )
-
     if not args.json:
         print("=" * 68)
-        print(f"  GBA -> 3DS Virtual Console (AGB_FIRM) CIA 打包工具 v{__version__}")
+        print(f"  {rom_info.system_name} -> 3DS Virtual Console CIA 打包工具 v{__version__}")
         print("=" * 68)
-        print(f"[1/4] 解析 GBA ROM 头部信息:")
-        print(f"      文件名称     : {input_path.name}")
-        print(f"      原始大小     : {_format_size(rom_info.raw_size)} -> 填充后 {_format_size(rom_info.padded_size)}")
+        print(f"[1/4] 解析 {rom_info.system_name} ({rom_info.system.upper()}) ROM 信息:")
+        print(f"      文件名称     : {Path(rom_info.file_path).name}")
+        print(f"      原始大小     : {_format_size(rom_info.raw_size)} -> 打包载荷 {_format_size(rom_info.padded_size)}")
         print(f"      内部标题     : {rom_info.internal_title}")
         print(f"      游戏编号     : {rom_info.game_code} ({rom_info.product_code}) | 区域: {rom_info.region}")
         print(f"      厂商代码     : {rom_info.maker_code} | 修订版本: Rev {rom_info.version}")
         print(f"      CRC32 校验   : {rom_info.crc32_hex} | 头部校验: {'通过' if rom_info.header_valid else '非标准'}")
         print(
-            f"      SDK 存档特征 : {', '.join(rom_info.sdk_save_strings) if rom_info.sdk_save_strings else '无'}"
+            f"      硬件/存档特征: {', '.join(rom_info.sdk_save_strings) if rom_info.sdk_save_strings else '无'}"
             f" | RTC 时钟: {'是' if rom_info.has_rtc else '否'}"
         )
-        print(f"      AGB 存档模式 : [0x{rom_info.save_type_id:02X}] {rom_info.save_type_name}")
+        print(f"      3DS 运行模式 : [0x{rom_info.save_type_id:02X}] {rom_info.save_type_name}")
         print(f"      3DS TitleID  : {rom_info.title_id_hex}")
 
     if not args.json:
@@ -294,6 +315,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                     "output_cia_path": result.output_cia_path,
                     "cia_size": result.cia_size,
                     "cia_sha256": result.cia_sha256,
+                    "system": rom_info.system,
+                    "system_name": rom_info.system_name,
                     "title_id": rom_info.title_id_hex,
                     "product_code": rom_info.product_code,
                     "game_code": rom_info.game_code,
@@ -309,6 +332,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                     "preview_icon_png": result.preview_icon_png_path,
                     "verification": {
                         "all_hashes_valid": verification["all_hashes_valid"],
+                        "romfs_ivfc_valid": verification.get("romfs_ivfc_valid", True),
                         "agb_firm_ready": verification["agb_firm_ready"],
                     },
                 },
@@ -322,9 +346,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     print(f"      输出文件     : {result.output_cia_path}")
     print(f"      CIA 大小     : {_format_size(result.cia_size)}")
     print(f"      CIA SHA-256  : {result.cia_sha256}")
+    mode_label = (
+        f"AGB_FIRM 硬件模式 (CoreVersion={verification['core_version']})"
+        if rom_info.system == "gba"
+        else f"{rom_info.system_name} VC 模式 (CoreVersion={verification['core_version']})"
+    )
     print(
         f"      容器完整性   : {'全部 SHA-256 校验通过' if verification['all_hashes_valid'] else '校验异常'} "
-        f"| AGB_FIRM 硬件模式: {'已就绪 (CoreVersion=0x202)' if verification['agb_firm_ready'] else '异常'}"
+        f"| {mode_label}: {'已就绪' if verification['agb_firm_ready'] else '异常'}"
     )
     if result.preview_banner_png_path:
         print(f"      横幅预览图   : {result.preview_banner_png_path}")
@@ -379,20 +408,21 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print("=" * 68)
         return 0
     else:
-        rom_info = parse_gba_rom(str(target))
+        rom_info, _ = parse_rom_auto(str(target))
         if args.json:
             print(json.dumps(rom_info.__dict__, ensure_ascii=False, indent=2))
             return 0
         print("=" * 68)
-        print(f"  GBA ROM 检查报告: {target.name}")
+        print(f"  {rom_info.system_name} ({rom_info.system.upper()}) ROM 检查报告: {target.name}")
         print("=" * 68)
         print(f"  文件路径       : {rom_info.file_path}")
-        print(f"  原始大小       : {_format_size(rom_info.raw_size)} (AGB 填充后: {_format_size(rom_info.padded_size)})")
+        print(f"  系统平台       : {rom_info.system_name} ({rom_info.system.upper()})")
+        print(f"  原始大小       : {_format_size(rom_info.raw_size)} (填充后: {_format_size(rom_info.padded_size)})")
         print(f"  内部标题       : {rom_info.internal_title}")
         print(f"  游戏编号       : {rom_info.game_code} ({rom_info.region}) | 厂商代码: {rom_info.maker_code}")
         print(f"  CRC32 / SHA1   : {rom_info.crc32_hex} / {rom_info.sha1}")
-        print(f"  SDK 存档特征   : {', '.join(rom_info.sdk_save_strings) or '无'}")
-        print(f"  AGB 存档类型   : [0x{rom_info.save_type_id:02X}] {rom_info.save_type_name}")
+        print(f"  硬件/存档特征  : {', '.join(rom_info.sdk_save_strings) or '无'}")
+        print(f"  3DS 运行模式   : [0x{rom_info.save_type_id:02X}] {rom_info.save_type_name}")
         print(f"  推荐 TitleID   : {rom_info.title_id_hex}")
         print("=" * 68)
         return 0

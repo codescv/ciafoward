@@ -13,10 +13,11 @@ All templates are bundled offline inside `ciafoward/assets/vc_templates.bin` (zl
 from __future__ import annotations
 
 import json
+import lzma
 import struct
 import zlib
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .metadata import _http_get_bytes, get_cache_dir
 
@@ -26,6 +27,7 @@ BANNER_CGFX_URLS = [
 ]
 
 _BUNDLE_CACHE: Optional[Dict[str, bytes]] = None
+_CONSOLE_BUNDLE_CACHE: Optional[Tuple[Dict[str, Any], bytes]] = None
 
 
 def _load_bundle() -> Dict[str, bytes]:
@@ -178,4 +180,81 @@ def build_gbavc_exheader(
     struct.pack_into("<Q", base, 0x200, title_id)
     struct.pack_into("<I", base, 0x208, 0x00000202)
     return bytes(base)
+
+
+def _load_console_bundle() -> Tuple[Dict[str, Any], bytes]:
+    """Load and decompress the deduplicated multi-console `console_templates.xz` archive."""
+    global _CONSOLE_BUNDLE_CACHE
+    if _CONSOLE_BUNDLE_CACHE is not None:
+        return _CONSOLE_BUNDLE_CACHE
+
+    asset_path = Path(__file__).resolve().parent / "assets" / "console_templates.xz"
+    if not asset_path.is_file():
+        raise FileNotFoundError(f"Missing bundled multi-console template archive: {asset_path}")
+
+    raw = lzma.decompress(asset_path.read_bytes())
+    if raw[:4] != b"VCMC":
+        raise ValueError("Corrupted console_templates.xz header (expected 'VCMC')")
+
+    (hdr_len,) = struct.unpack_from("<I", raw, 4)
+    manifest = json.loads(raw[8 : 8 + hdr_len].decode("utf-8"))
+    body = raw[8 + hdr_len :]
+    _CONSOLE_BUNDLE_CACHE = (manifest, body)
+    return _CONSOLE_BUNDLE_CACHE
+
+
+def get_console_template(system: str) -> Dict[str, Any]:
+    """
+    Retrieve the bundled ExHeader, ExeFS `.code`, base RomFS files, and extra blobs
+    for `system` in `("gb", "gbc", "nes", "snes", "md")`.
+    """
+    sys_key = system.lower()
+    manifest, body = _load_console_bundle()
+    systems = manifest.get("systems", {})
+    if sys_key not in systems:
+        raise ValueError(f"No console template found for system '{system}'")
+
+    blobs = manifest["blobs"]
+    sys_info = systems[sys_key]
+
+    def _get_blob(h: str) -> bytes:
+        off, length = blobs[h]
+        return body[off : off + length]
+
+    romfs_files: Dict[str, bytes] = {
+        rel_path: _get_blob(h) for rel_path, h in sys_info.get("romfs", {}).items()
+    }
+    extra_blobs: Dict[str, bytes] = {
+        k: _get_blob(h) for k, h in sys_info.get("extra", {}).items()
+    }
+
+    return {
+        "exheader": _get_blob(sys_info["exheader"]),
+        "code": _get_blob(sys_info["code"]),
+        "romfs_files": romfs_files,
+        "extra": extra_blobs,
+    }
+
+
+def build_console_exheader(
+    system: str,
+    title_id: int,
+    save_data_size: int,
+    template_bytes: Optional[bytes] = None,
+) -> bytes:
+    """
+    Construct a 0x800-byte Extended Header for a non-GBA Virtual Console / Forwarder system
+    (`gb`, `gbc`, `nes`, `snes`, `md`), preserving the engine's required process name (`QBAP` / `CtrApp`)
+    and `SCI Flags`, while updating SaveDataSize (`0x1C0`), JumpID (`0x1C8`), ACI ProgramID (`0x200`),
+    and AccessDescriptor ProgramID (`0x600`).
+    """
+    if template_bytes is None or len(template_bytes) != 0x800:
+        template_bytes = get_console_template(system)["exheader"]
+    base = bytearray(template_bytes)
+    struct.pack_into("<Q", base, 0x1C0, save_data_size)
+    struct.pack_into("<Q", base, 0x1C8, title_id)
+    struct.pack_into("<Q", base, 0x200, title_id)
+    struct.pack_into("<Q", base, 0x600, title_id)
+    return bytes(base)
+
 

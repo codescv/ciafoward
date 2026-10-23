@@ -291,24 +291,45 @@ def decompress_lz11(comp: bytes) -> bytes:
     return bytes(out[:decomp_size])
 
 
-def build_gba_chime_bcwav(sample_rate: int = 22050, duration_s: float = 1.1) -> bytes:
+def build_gba_chime_bcwav(
+    sample_rate: int = 22050,
+    duration_s: float = 1.1,
+    system: str = "gba",
+) -> bytes:
     """
-    Synthesize a 3DS BCWAV (CWAV) audio file playing the classic GBA boot chime (B5 -> E6).
+    Synthesize a 3DS BCWAV (CWAV) audio file playing a console-specific boot chime:
+      - `gba`: Classic GBA boot chime (B5 -> E6)
+      - `gb` / `gbc`: Classic Game Boy 'ba-ding!' (C6 -> C7)
+      - `nes`: 8-bit pulse wave chime (E5 -> B5 -> E6)
+      - `snes`: Warm 16-bit triad chord (C5 + G5 + E6)
+      - `md`: Sega Genesis FM-style fifth chord (G4 + D5 + B5)
     """
+    sys_key = (system or "gba").lower()
+    if sys_key in ("gb", "gbc"):
+        f1, f2, split_t = 1046.50, 2093.00, 0.09
+    elif sys_key == "nes":
+        f1, f2, split_t = 987.77, 1318.51, 0.08
+    elif sys_key == "snes":
+        f1, f2, split_t = 659.25, 1318.51, 0.14
+    elif sys_key == "md":
+        f1, f2, split_t = 587.33, 880.00, 0.16
+    else:
+        f1, f2, split_t = 987.77, 1318.51, 0.11
+
     num_samples = int(sample_rate * duration_s)
     pcm = bytearray()
     for i in range(num_samples):
         t = i / sample_rate
-        if t < 0.11:
+        if t < split_t:
             env = math.exp(-t * 12.0)
-            s = 0.65 * math.sin(2 * math.pi * 987.77 * t) + 0.35 * math.sin(2 * math.pi * 1975.53 * t)
+            s = 0.65 * math.sin(2 * math.pi * f1 * t) + 0.35 * math.sin(2 * math.pi * (f1 * 2) * t)
         else:
-            t2 = t - 0.11
+            t2 = t - split_t
             env = math.exp(-t2 * 4.5)
             s = (
-                0.60 * math.sin(2 * math.pi * 1318.51 * t2)
-                + 0.25 * math.sin(2 * math.pi * 2637.02 * t2)
-                + 0.15 * math.sin(2 * math.pi * 987.77 * t) * math.exp(-t * 8.0)
+                0.60 * math.sin(2 * math.pi * f2 * t2)
+                + 0.25 * math.sin(2 * math.pi * (f2 * 2) * t2)
+                + 0.15 * math.sin(2 * math.pi * f1 * t) * math.exp(-t * 8.0)
             )
         val = max(-32767, min(32767, int(s * env * 22000)))
         pcm += struct.pack("<h", val)
@@ -460,10 +481,11 @@ def build_cbmd_banner(
     screen_img: Optional[RGBAImage] = None,
     short_title: str = "GBA Virtual Console",
     subtitle: str = "Nintendo",
+    system: str = "gba",
 ) -> bytes:
     """
     Build a 3DS ExeFS `banner` (CBMD container):
-      - If `banner_style in ("vc", "3d", "vc3d")`, uses the authentic 3D GBA Virtual Console CGFX.
+      - If `banner_style in ("vc", "3d", "vc3d")`, uses the authentic 3D Virtual Console CGFX.
       - Otherwise (or for `banner_style == "2d"`), uses `bannertool`'s 0x1580-byte CGFX header
         with a 256x128 RGBA4 Morton texture (`0x11580` bytes total).
     """
@@ -487,7 +509,7 @@ def build_cbmd_banner(
     comp_cgfx = compress_lz11(cgfx_raw)
 
     if bcwav_bytes is None:
-        bcwav_bytes = build_gba_chime_bcwav()
+        bcwav_bytes = build_gba_chime_bcwav(system=system)
 
     cbmd_hdr = bytearray(0x88)
     cbmd_hdr[0x00:0x04] = b"CBMD"

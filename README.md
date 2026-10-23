@@ -1,6 +1,18 @@
 # ciafoward (`gba2cia`)
 
-将 GBA 游戏 ROM (`.gba`) 一键打包为 Nintendo 3DS 原生硬件模式 (**`AGB_FIRM` Virtual Console**) 可安装的 `.cia` 格式命令行工具。
+将经典掌机与主机游戏 ROM（**GBA / GB / GBC / NES / SNES / Sega Genesis / `.zip`**）一键打包为 Nintendo 3DS **Virtual Console / Forwarder** 可安装的 `.cia` 桌面图标命令行工具。
+
+## 支持的主机平台与运行内核
+
+| 平台 (`--system`) | 支持扩展名 | 3DS 运行内核 / 模拟架构 | 机型要求 |
+|---|---|---|---|
+| **GBA** (`gba`) | `.gba`, `.agb` | **3DS 内置 `AGB_FIRM` 裸机硬件模式** (`CoreVersion = 0x202`, `.CAA` 尾部) | 全系列 3DS / 2DS |
+| **Game Boy** (`gb`) | `.gb`, `.sgb` | **任天堂官方 3DS GB Virtual Console**（支持下屏点阵绿屏与实机边框切换、存档点） | 全系列 3DS / 2DS |
+| **Game Boy Color** (`gbc`) | `.gbc` | **任天堂官方 3DS GBC Virtual Console**（原生支持 MBC3 实时时钟 RTC 如《宝可梦 金/银/水晶》） | 全系列 3DS / 2DS |
+| **NES / FC** (`nes`) | `.nes` | **任天堂官方 3DS NES Virtual Console**（自动将 iNES 转换为任天堂 `TNES` 映射器格式） | 全系列 3DS / 2DS |
+| **SNES / SFC** (`snes`) | `.sfc`, `.smc` | **任天堂官方 New 3DS SNES Virtual Console**（自动剥离 `.smc` 头部并封装 `LoROM`/`HiROM` `.ves` `data.bin`） | New 3DS / New 2DS XL |
+| **Sega Genesis / MD** (`md`) | `.md`, `.gen`, `.smd`, `.bin` | **PicoDrive 3DS 独立 Forwarder**（支持 `.smd` 奇偶交错自动解交错、60fps 满速运行与即时存档） | 全系列 3DS / 2DS |
+| **ZIP 压缩包** | `.zip` | 自动解压并识别压缩包内的上述任意 ROM 格式 | 同对应平台 |
 
 ## 功能特性
 
@@ -8,18 +20,21 @@
   - 使用 3DS 内置 ARM7TDMI 硬件运行 GBA 游戏（非软件模拟器，满速零延迟）。
   - 自动生成标准 **`0x360` 字节 `.CAA` 硬件配置尾部**（含存档芯片时序参数、LCD 残影控制与 256 级 RGB 色彩查找表）。
   - 默认内置 **1:1 原始亮丽色彩恢复 LUT**（去除官方大使版灰暗滤镜，可通过 `--dark-filter` 切换）以及 **零残影清晰显示**（`--ghosting 0`）。
-  - 内置完整的 3DS Retail 证书链与签名模板，生成的 `.cia` 可直接通过 **FBI** 安装。
-- **智能识别存档类型与实时时钟 (RTC)**：
-  - 自动扫描 ROM 内置 Nintendo SDK 存档标识（`EEPROM_Vxxx`、`SRAM_Vxxx`、`FLASH_Vxxx`、`FLASH512_Vxxx`、`FLASH1M_Vxxx`）与 `SIIRTC_Vxxx` 时钟芯片标识。
-  - 自动区分 `4kbit (512B)` 与 `64kbit (8KB)` EEPROM、`64KB Flash 512K (Panasonic/Macronix/Atmel)` 与 `128KB Flash 1M (Macronix/Sanyo)`，原生支持《高级战争》《宝可梦 宝石/火红/叶绿》等，无需手动打 SRAM 补丁。
-- **自动下载配置游戏封面、标题画面与 3D Virtual Console 横幅**：
-  - 根据 ROM 的 `CRC32`、4 字符游戏编号（如 `AWRE`）及文件名，自动匹配 **Libretro No-Intro 数据库**与内置经典游戏库，获取规范名称、发行商、发行年份与区域。
-  - 自动从 Libretro Thumbnail CDN 下载 **游戏封面 (`Named_Boxarts`)** 与 **标题画面 (`Named_Titles`)** 并本地缓存。
-  - 默认生成 **官方 3DS GBA Virtual Console 3D 掌机模型上屏预览 (`CBMD`)**（含游戏画面贴图、动态双行标题铭牌与经典 GBA 开机音效 `BCWAV`），以及无黑格失真的 PICA200 Morton Z-Order `SMDH` 桌面图标（`48x48` & `24x24`）。
+  - 内置完整的 3DS Retail 证书链、多平台官方 VC 模板与纯 Python 3DS `IVFC` (RomFS) 三级 SHA-256 哈希树构建器，生成的 `.cia` 可直接通过 **FBI** 安装。
+- **智能识别各平台头部与存档类型**：
+  - **GBA**：自动扫描 Nintendo SDK 存档标识（`EEPROM_Vxxx`、`SRAM_Vxxx`、`FLASH_Vxxx`、`FLASH512_Vxxx`、`FLASH1M_Vxxx`）与 `SIIRTC_Vxxx` 时钟芯片标识。
+  - **GB / GBC**：自动解析 `0x0100..0x014F` 头部、CGB 标志位、MBC1/MBC2/MBC3(RTC)/MBC5 卡带类型与 SRAM 大小。
+  - **NES**：自动解析 iNES / NES 2.0 头部与 Mapper 编号，并自动转换为任天堂 3DS VC 专用的 16 字节 `TNES` 头部。
+  - **SNES**：自动检测并剥离 512 字节 `.smc` 拷贝机头部，自动识别 `LoROM` (`0x7FC0`) 与 `HiROM` (`0xFFC0`) 并配置官方 VC Preset ID。
+  - **Sega Genesis / MD**：自动检测并还原 `.smd` (Super Magic Drive) 16KB 奇偶交错块为标准线性 `.md` 镜像。
+- **自动下载多平台封面、标题画面与 3D Virtual Console 横幅**：
+  - 根据平台类型、ROM `CRC32`、游戏编号及文件名，自动查询对应平台的 **Libretro No-Intro 数据库**（GBA / GB / GBC / NES / SNES / Mega Drive），获取规范名称、发行商、发行年份与区域。
+  - 自动从 Libretro Thumbnail CDN 下载对应平台的 **游戏封面 (`Named_Boxarts`)** 与 **标题画面 (`Named_Titles`)** 并本地缓存。
+  - 默认生成 **3D Virtual Console 上屏预览 (`CBMD`)**（含游戏画面贴图、动态双行标题铭牌与各平台专属开机音效 `BCWAV`），以及无黑格失真的 PICA200 Morton Z-Order `SMDH` 桌面图标（`48x48` & `24x24`）。
 - **模拟器存档转换与导入 (`ciafoward save`)**：
   - 支持将 mGBA (`.sav`)、RetroArch (`.srm`)、VBA (`.sav`) 存档一键转换为 3DS `AGB_FIRM` 精确硬件尺寸（自动剥离 RTC 尾部或 RetroArch 128KB 冗余填充，支持 EEPROM 8 字节字节序翻转），并附带完整的 **GodMode9** 注入指引。
 - **纯 Python 跨平台零外部工具依赖**：
-  - 无需外部 `makerom` 或 `bannertool` 二进制文件，纯 Python 即可在 macOS / Linux / Windows 上运行。
+  - 无需外部 `makerom`、`bannertool` 或 `3dstool` 二进制文件，纯 Python 即可在 macOS / Linux / Windows 上运行。
 
 ---
 
@@ -45,10 +60,25 @@ uv run ciafoward --help
 
 ## 快速使用
 
-### 1. 一键打包 `.gba` 为 `.cia`（自动下载封面与游戏信息）
+### 1. 一键打包任意支持平台 ROM 为 `.cia`（自动识别平台、下载封面与游戏信息）
 
 ```bash
+# GBA (原生 AGB_FIRM 硬件模式)
 ciafoward "~/Downloads/Advance Wars (USA) (Rev 1).gba"
+
+# Game Boy / Game Boy Color (官方 3DS GB/GBC Virtual Console)
+ciafoward "~/Downloads/Tetris (World).gb"
+ciafoward "~/Downloads/Pokemon - Crystal Version (USA, Europe).gbc"
+
+# NES / FC (官方 3DS NES Virtual Console)
+ciafoward "~/Downloads/Super Mario Bros. 3 (USA).nes"
+
+# SNES / SFC (官方 New 3DS SNES Virtual Console)
+ciafoward "~/Downloads/Super Mario World (USA).sfc"
+
+# Sega Genesis / Mega Drive (PicoDrive 3DS Forwarder) 或 .zip 压缩包
+ciafoward "~/Downloads/Sonic The Hedgehog 2 (World).md"
+ciafoward "~/Downloads/Chrono Trigger (USA).zip"
 ```
 
 指定输出路径，并导出横幅/图标 PNG 预览图：
@@ -109,8 +139,9 @@ ciafoward save game.gba vba_eeprom.sav -o 3ds_eeprom.sav --swap-eeprom
 
 | 参数 | 说明 |
 |---|---|
-| `input` | 输入的 `.gba` ROM 文件路径 |
+| `input` | 输入的游戏 ROM 文件路径 (`.gba`, `.gb`, `.gbc`, `.nes`, `.sfc`, `.smc`, `.md`, `.gen`, `.smd`, `.zip`) |
 | `-o, --output` | 输出的 `.cia` 文件路径 |
+| `--system` | 指定主机平台类型：`auto`（默认自动识别）、`gba`、`gb`、`gbc`、`nes`、`snes`、`md` |
 | `--title` | 自定义游戏显示名称（同时作用于桌面图标与 3D 横幅铭牌） |
 | `--publisher` | 自定义发行商名称（例如 `Nintendo`） |
 | `--year` | 自定义发行年份（例如 `2001`） |

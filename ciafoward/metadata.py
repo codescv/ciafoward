@@ -19,6 +19,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .consoles import SYSTEM_SPECS
 from .gba import GBARomInfo
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -160,7 +161,7 @@ LIBRETRO_PUBLISHER_DAT_URL = (
 
 @dataclasses.dataclass
 class GameMetadata:
-    """Resolved metadata and artwork paths for a GBA game."""
+    """Resolved metadata and artwork paths for a game ROM."""
 
     short_title: str
     long_title: str
@@ -174,6 +175,24 @@ class GameMetadata:
     boxart_url: Optional[str] = None
     title_screen_url: Optional[str] = None
     source: str = "header"
+    system: str = "gba"
+    system_name: str = "Game Boy Advance"
+
+
+def _get_libretro_urls_for_system(system: str) -> Tuple[List[str], str, str, str]:
+    """Return `(thumbnail_bases, nointro_dat_url, year_dat_url, publisher_dat_url)` for `system`."""
+    spec = SYSTEM_SPECS.get(system.lower(), SYSTEM_SPECS["gba"])
+    db_name = str(spec["libretro_db"])
+    encoded_db = urllib.parse.quote(db_name)
+    repo_db = db_name.replace(" - ", "_-_").replace(" ", "_")
+    thumb_bases = [
+        f"https://thumbnails.libretro.com/{encoded_db}",
+        f"https://raw.githubusercontent.com/libretro-thumbnails/{repo_db}/master",
+    ]
+    nointro_url = f"https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/no-intro/{encoded_db}.dat"
+    year_url = f"https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/releaseyear/{encoded_db}.dat"
+    pub_url = f"https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/publisher/{encoded_db}.dat"
+    return thumb_bases, nointro_url, year_url, pub_url
 
 
 def get_cache_dir() -> Path:
@@ -249,7 +268,7 @@ def candidate_nointro_names(
 
     # 3. Built-in GBA catalog match by 3-char Game Code prefix
     prefix3 = rom_info.game_code[:3].upper()
-    if prefix3 in BUILTIN_GBA_CATALOG:
+    if rom_info.system == "gba" and prefix3 in BUILTIN_GBA_CATALOG:
         title, _, _, builtin_nointro = BUILTIN_GBA_CATALOG[prefix3]
         add(builtin_nointro)
         add(f"{title} ({rom_info.region})")
@@ -343,9 +362,11 @@ def lookup_online_libretro_db(
     timeout: float = 10.0,
 ) -> Optional[Dict[str, str]]:
     """
-    Look up the ROM by CRC32 or Serial in the Libretro No-Intro GBA database (cached locally as JSON).
+    Look up the ROM by CRC32 or Serial in the Libretro No-Intro database for `rom_info.system`
+    (cached locally as JSON).
     """
-    db_cache_file = cache_dir / "gba_libretro_index.json"
+    sys_key = (rom_info.system or "gba").lower()
+    db_cache_file = cache_dir / f"{sys_key}_libretro_index.json"
     index_data: Optional[Dict[str, Dict[str, str]]] = None
 
     if db_cache_file.exists():
@@ -355,19 +376,20 @@ def lookup_online_libretro_db(
             index_data = None
 
     if index_data is None:
-        raw_dat = _http_get_bytes(LIBRETRO_NOINTRO_DAT_URL, timeout=timeout)
+        _, nointro_url, year_url, pub_url = _get_libretro_urls_for_system(sys_key)
+        raw_dat = _http_get_bytes(nointro_url, timeout=timeout)
         if raw_dat:
             dat_text = raw_dat.decode("utf-8", errors="replace")
             crc_map, serial_map = _parse_libretro_dat(dat_text)
             year_map: Dict[str, str] = {}
             pub_map: Dict[str, str] = {}
 
-            raw_year = _http_get_bytes(LIBRETRO_YEAR_DAT_URL, timeout=timeout)
+            raw_year = _http_get_bytes(year_url, timeout=timeout)
             if raw_year:
                 year_map = _parse_libretro_kv_dat(
                     raw_year.decode("utf-8", errors="replace"), "releaseyear"
                 )
-            raw_pub = _http_get_bytes(LIBRETRO_PUBLISHER_DAT_URL, timeout=timeout)
+            raw_pub = _http_get_bytes(pub_url, timeout=timeout)
             if raw_pub:
                 pub_map = _parse_libretro_kv_dat(
                     raw_pub.decode("utf-8", errors="replace"), "publisher"
@@ -392,7 +414,11 @@ def lookup_online_libretro_db(
     year_map = index_data.get("year", {})
     pub_map = index_data.get("publisher", {})
 
-    canonical = crc_map.get(rom_info.crc32_hex) or serial_map.get(rom_info.game_code.upper())
+    canonical = (
+        crc_map.get(rom_info.lookup_crc32_hex)
+        or crc_map.get(rom_info.crc32_hex)
+        or serial_map.get(rom_info.game_code.upper())
+    )
     if not canonical:
         return None
 
@@ -408,14 +434,21 @@ def download_libretro_thumbnail(
     category: str,
     cache_dir: Path,
     timeout: float = 10.0,
+    system: str = "gba",
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Attempt to download a PNG thumbnail for any of `candidates` from Libretro Thumbnails.
     `category` is one of: "Named_Boxarts", "Named_Titles", "Named_Snaps".
     Returns (local_file_path, source_url) or (None, None).
     """
-    covers_dir = cache_dir / "covers" / category
+    sys_key = (system or "gba").lower()
+    covers_dir = (
+        cache_dir / "covers" / category
+        if sys_key == "gba"
+        else cache_dir / "covers" / sys_key / category
+    )
     covers_dir.mkdir(parents=True, exist_ok=True)
+    thumb_bases, _, _, _ = _get_libretro_urls_for_system(sys_key)
 
     for candidate in candidates:
         safe_name = sanitize_libretro_name(candidate)
@@ -423,10 +456,10 @@ def download_libretro_thumbnail(
         if cached_file.exists() and cached_file.stat().st_size > 64:
             data = cached_file.read_bytes()
             if data.startswith(PNG_MAGIC):
-                return str(cached_file), f"cache://{category}/{safe_name}.png"
+                return str(cached_file), f"cache://{sys_key}/{category}/{safe_name}.png"
 
         encoded_name = urllib.parse.quote(f"{safe_name}.png")
-        for base_url in LIBRETRO_THUMBNAIL_BASES:
+        for base_url in thumb_bases:
             url = f"{base_url}/{category}/{encoded_name}"
             img_bytes = _http_get_bytes(url, timeout=timeout)
             if img_bytes and img_bytes.startswith(PNG_MAGIC):
@@ -455,15 +488,18 @@ def resolve_game_metadata(
     cover art (boxart) and title screen image if available.
     """
     cache_dir = get_cache_dir()
+    sys_key = (rom_info.system or "gba").lower()
+    spec = SYSTEM_SPECS.get(sys_key, SYSTEM_SPECS["gba"])
+    default_years = {"gba": "2001", "gb": "1989", "gbc": "1998", "nes": "1985", "snes": "1991", "md": "1989"}
     prefix3 = rom_info.game_code[:3].upper()
-    publisher = MAKER_CODES.get(rom_info.maker_code.upper(), "Nintendo")
-    release_year = "2001"
+    publisher = MAKER_CODES.get(rom_info.maker_code.upper(), str(spec["default_publisher"]))
+    release_year = default_years.get(sys_key, "2001")
     display_title = ""
     canonical_name = ""
     source = "header"
 
-    # 1. Check built-in catalog first
-    if prefix3 in BUILTIN_GBA_CATALOG:
+    # 1. Check built-in catalog first (for GBA)
+    if sys_key == "gba" and prefix3 in BUILTIN_GBA_CATALOG:
         b_title, b_pub, b_year, b_nointro = BUILTIN_GBA_CATALOG[prefix3]
         display_title = b_title
         publisher = b_pub
@@ -542,15 +578,15 @@ def resolve_game_metadata(
         )
         if not boxart_path:
             boxart_path, boxart_url = download_libretro_thumbnail(
-                candidates, "Named_Boxarts", cache_dir=cache_dir, timeout=timeout
+                candidates, "Named_Boxarts", cache_dir=cache_dir, timeout=timeout, system=sys_key
             )
         if not title_screen_path:
             title_screen_path, title_screen_url = download_libretro_thumbnail(
-                candidates, "Named_Titles", cache_dir=cache_dir, timeout=timeout
+                candidates, "Named_Titles", cache_dir=cache_dir, timeout=timeout, system=sys_key
             )
             if not title_screen_path:
                 title_screen_path, title_screen_url = download_libretro_thumbnail(
-                    candidates, "Named_Snaps", cache_dir=cache_dir, timeout=timeout
+                    candidates, "Named_Snaps", cache_dir=cache_dir, timeout=timeout, system=sys_key
                 )
 
     return GameMetadata(
@@ -566,4 +602,6 @@ def resolve_game_metadata(
         boxart_url=boxart_url,
         title_screen_url=title_screen_url,
         source=source,
+        system=sys_key,
+        system_name=str(spec["name"]),
     )

@@ -3,9 +3,11 @@ Unit and integration tests for `ciafoward`.
 """
 
 import hashlib
+import io
 import struct
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from ciafoward.banner import (
@@ -25,6 +27,7 @@ from ciafoward.cia import (
     package_gba_to_cia,
     verify_and_inspect_cia,
 )
+from ciafoward.consoles import GB_LOGO_PREFIX, parse_rom_auto
 from ciafoward.gba import (
     NINTENDO_LOGO_PREFIX,
     SaveTypeID,
@@ -40,7 +43,9 @@ from ciafoward.graphics import (
     encode_png_bytes,
 )
 from ciafoward.metadata import resolve_game_metadata
+from ciafoward.romfs import build_romfs, extract_romfs, verify_romfs_ivfc
 from ciafoward.save_tool import convert_save_for_3ds, swap_eeprom_8byte_blocks
+from ciafoward.templates import get_romfs_bytes
 
 
 def make_synthetic_gba_rom(
@@ -227,6 +232,101 @@ class TestCiaFoward(unittest.TestCase):
         swapped = swap_eeprom_8byte_blocks(raw)
         self.assertEqual(swapped, b"76543210HGFEDCBA")
         self.assertEqual(swap_eeprom_8byte_blocks(swapped), raw)
+
+    def test_romfs_ivfc_builder_and_verifier(self) -> None:
+        empty_romfs = build_romfs({})
+        self.assertEqual(empty_romfs, get_romfs_bytes())
+        self.assertTrue(verify_romfs_ivfc(empty_romfs))
+
+        sample_files = {
+            "config.ini": b"[rom]\npath=rom/rom.bin\n",
+            "rom/rom.bin": b"TEST_ROM_PAYLOAD" * 256,
+            "patch/v1.patch": b"PATCH_DATA_12345",
+        }
+        built = build_romfs(sample_files)
+        self.assertTrue(verify_romfs_ivfc(built))
+        self.assertEqual(extract_romfs(built), sample_files)
+
+    def test_multi_console_cia_builds(self) -> None:
+        # 1. Synthetic GB / GBC ROM
+        gb_rom = bytearray(32 * 1024)
+        gb_rom[0x104 : 0x104 + len(GB_LOGO_PREFIX)] = GB_LOGO_PREFIX
+        gb_rom[0x134:0x13F] = b"TETRIS     "
+        gb_rom[0x147] = 0x03  # MBC1+RAM+BATTERY
+        gb_rom[0x149] = 0x02  # 8KB SRAM
+        chk = 0
+        for b in gb_rom[0x134:0x14D]:
+            chk = (chk - b - 1) & 0xFF
+        gb_rom[0x14D] = chk
+
+        gbc_rom = bytearray(gb_rom)
+        gbc_rom[0x134:0x13F] = b"ZELDA DX   "
+        gbc_rom[0x13F:0x143] = b"AZLE"
+        gbc_rom[0x143] = 0xC0  # GBC-only
+        chk_c = 0
+        for b in gbc_rom[0x134:0x14D]:
+            chk_c = (chk_c - b - 1) & 0xFF
+        gbc_rom[0x14D] = chk_c
+
+        # 2. Synthetic iNES (.nes) ROM (Mapper 1, 2x16KB PRG, 1x8KB CHR, Battery)
+        nes_rom = bytearray(b"NES\x1a\x02\x01\x12\x00" + b"\x00" * 8) + bytearray(b"\xAA" * (32768 + 8192))
+
+        # 3. Synthetic SNES LoROM (.sfc)
+        snes_rom = bytearray(256 * 1024)
+        snes_rom[0x7FC0 : 0x7FC0 + 21] = b"SUPER MARIO WORLD    "
+        snes_rom[0x7FC0 + 0x15] = 0x20  # LoROM
+        snes_rom[0x7FC0 + 0x18] = 0x01  # 2KB SRAM
+        snes_rom[0x7FC0 + 0x19] = 0x01  # USA
+        struct.pack_into("<HH", snes_rom, 0x7FC0 + 0x1C, 0xAAAA, 0x5555)
+
+        # 4. Synthetic Sega Genesis (.md) ROM
+        md_rom = bytearray(128 * 1024)
+        md_rom[0x100:0x110] = b"SEGA GENESIS    "
+        md_rom[0x120:0x150] = b"SONIC THE HEDGEHOG".ljust(0x30, b" ")
+        md_rom[0x150:0x180] = b"SONIC THE HEDGEHOG".ljust(0x30, b" ")
+        md_rom[0x180:0x18E] = b"GM 00001009-00"
+        md_rom[0x1F0:0x1F3] = b"U  "
+
+        cases = [
+            ("Tetris (World).gb", bytes(gb_rom), "gb"),
+            ("Legend of Zelda, The - Link's Awakening DX (USA).gbc", bytes(gbc_rom), "gbc"),
+            ("Super Mario Bros. (World).nes", bytes(nes_rom), "nes"),
+            ("Super Mario World (USA).sfc", bytes(snes_rom), "snes"),
+            ("Sonic The Hedgehog (USA, Europe).md", bytes(md_rom), "md"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for fname, raw_bytes, expected_sys in cases:
+                rom_path = Path(tmpdir) / fname
+                rom_path.write_bytes(raw_bytes)
+                rom_info, clean_bytes = parse_rom_auto(str(rom_path))
+                self.assertEqual(rom_info.system, expected_sys)
+
+                meta = resolve_game_metadata(rom_info, download_artwork=False, use_online_db=False)
+                out_cia = Path(tmpdir) / f"{expected_sys}_test.cia"
+                package_gba_to_cia(
+                    rom_bytes=clean_bytes,
+                    rom_info=rom_info,
+                    metadata=meta,
+                    output_cia_path=str(out_cia),
+                    download_templates=False,
+                )
+                report = verify_and_inspect_cia(str(out_cia))
+                self.assertEqual(report["system"], expected_sys)
+                self.assertTrue(report["cert_chain_valid"])
+                self.assertTrue(report["all_hashes_valid"])
+                self.assertTrue(report["romfs_ivfc_valid"])
+                self.assertTrue(report["agb_firm_ready"])
+
+            # Also test transparent .zip ROM unpacking
+            zip_path = Path(tmpdir) / "Sonic_Bundle.zip"
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("Sonic The Hedgehog (USA).md", bytes(md_rom))
+            zip_path.write_bytes(buf.getvalue())
+            z_info, z_bytes = parse_rom_auto(str(zip_path))
+            self.assertEqual(z_info.system, "md")
+            self.assertEqual(len(z_bytes), len(md_rom))
 
 
 if __name__ == "__main__":
