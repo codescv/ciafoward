@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ciafoward"
+version = "1.0.0"
+description = "Convert GBA ROMs (.gba) into Nintendo 3DS Virtual Console CIA packages (.cia) using native AGB_FIRM hardware mode, with automatic cover art and metadata downloading."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "ciafoward"}
+]
+dependencies = []
+
+[project.optional-dependencies]
+pillow = ["Pillow>=9.0.0"]
+requests = ["requests>=2.28.0"]
+
+[project.scripts]
+ciafoward = "ciafoward.cli:main"
+gba2cia = "ciafoward.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ciafoward*"]
+
+[tool.setuptools.package-data]
+ciafoward = ["assets/*"]
