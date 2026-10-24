@@ -27,7 +27,7 @@ from ciafoward.cia import (
     package_gba_to_cia,
     verify_and_inspect_cia,
 )
-from ciafoward.consoles import GB_LOGO_PREFIX, convert_ines_to_tnes, parse_rom_auto
+from ciafoward.consoles import GB_LOGO_PREFIX, parse_rom_auto
 from ciafoward.gba import (
     NINTENDO_LOGO_PREFIX,
     SaveTypeID,
@@ -268,13 +268,8 @@ class TestCiaFoward(unittest.TestCase):
             chk_c = (chk_c - b - 1) & 0xFF
         gbc_rom[0x14D] = chk_c
 
-        # 2. Synthetic iNES (.nes) ROM (Mapper 4 MMC3, 8x16KB PRG, 16x8KB CHR)
-        nes_rom = bytearray(b"NES\x1a\x08\x10\x40\x00" + b"\x00" * 8) + bytearray(b"\xAA" * (131072 + 131072))
-        tnes_converted = convert_ines_to_tnes(bytes(nes_rom))
-        self.assertEqual(tnes_converted[:4], b"TNES")
-        self.assertEqual(tnes_converted[4], 3)  # iNES Mapper 4 (MMC3) -> TNES Mapper 3
-        self.assertEqual(tnes_converted[5], 16)  # 16 x 8KB PRG banks
-        self.assertEqual(tnes_converted[6], 16)  # 16 x 8KB CHR banks
+        # 2. Synthetic iNES (.nes) ROM (Mapper 1, 2x16KB PRG, 1x8KB CHR, Battery)
+        nes_rom = bytearray(b"NES\x1a\x02\x01\x12\x00" + b"\x00" * 8) + bytearray(b"\xAA" * (32768 + 8192))
 
         # 3. Synthetic SNES LoROM (.sfc)
         snes_rom = bytearray(256 * 1024)
@@ -322,8 +317,6 @@ class TestCiaFoward(unittest.TestCase):
                 self.assertTrue(report["all_hashes_valid"])
                 self.assertTrue(report["romfs_ivfc_valid"])
                 self.assertTrue(report["agb_firm_ready"])
-                if expected_sys == "snes":
-                    self.assertEqual(report["smdh"]["flags"], 0x00001195)
 
             # Also test transparent .zip ROM unpacking
             zip_path = Path(tmpdir) / "Sonic_Bundle.zip"

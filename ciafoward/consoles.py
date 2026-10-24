@@ -89,53 +89,36 @@ ALL_ROM_EXTENSIONS: Tuple[str, ...] = tuple(
     ext for spec in SYSTEM_SPECS.values() for ext in spec["extensions"]  # type: ignore[index]
 )
 
-# iNES Mapper ID -> Nintendo 3DS TNES Virtual Console Mapper ID (verified against QBAP jump tables)
+# iNES Mapper ID -> Nintendo 3DS TNES Virtual Console Mapper ID
 INES_TO_TNES_MAPPER: Dict[int, int] = {
     0: 0,    # NROM
     1: 1,    # MMC1 (SxROM)
     2: 6,    # UxROM
     3: 7,    # CNROM
-    4: 3,    # MMC3 (TxROM)
-    5: 5,    # MMC5 (ExROM)
+    4: 2,    # MMC3 (TxROM)
+    5: 3,    # MMC5 (ExROM)
     7: 9,    # AxROM
-    9: 2,    # MMC2 (PxROM)
-    10: 4,   # MMC4 (FxROM)
-    11: 31,  # Color Dreams
-    16: 27,  # Bandai FCG
-    18: 32,  # Jaleco SS88006
-    19: 37,  # Namco 163
-    21: 20,  # Konami VRC4a/VRC4c
-    22: 21,  # Konami VRC2a
-    23: 22,  # Konami VRC2b/VRC4e
-    24: 25,  # Konami VRC6a
-    25: 23,  # Konami VRC4b/VRC4d
-    26: 26,  # Konami VRC6b
-    32: 35,  # Irem G-101
-    33: 39,  # Taito TC0190
-    34: 47,  # BNROM
-    48: 40,  # Taito TC0690
-    65: 36,  # Irem H3001
-    66: 8,   # GxROM
-    67: 12,  # Sunsoft-3
-    68: 13,  # Sunsoft-4
-    69: 14,  # Sunsoft FME-7 / 5B
-    70: 15,  # Bandai 74161/32
-    73: 16,  # Konami VRC3
-    75: 17,  # Konami VRC1
-    78: 30,  # Irem 74HC161/32
-    80: 41,  # Taito X1-005
-    82: 42,  # Taito X1-017
-    85: 19,  # Konami VRC7
-    87: 11,  # Jaleco JF-05..10
-    89: 34,  # Sunsoft-2 (89)
-    93: 33,  # Sunsoft-2 (93)
-    118: 43, # TxSROM
-    119: 45, # TQROM
-    152: 29, # Bandai 74161/32 (152)
-    159: 27, # Bandai LZ93D50 (24C01)
-    184: 10, # Sunsoft-1
-    185: 28, # CNROM with protection
-    206: 38, # DxROM / Namcot 108
+    9: 4,    # MMC2 (PxROM)
+    10: 5,   # MMC4 (FxROM)
+    16: 94,  # Bandai FCG
+    18: 92,  # Jaleco SS88006
+    19: 88,  # Namco 163
+    21: 85,  # Konami VRC4a/VRC4c
+    22: 87,  # Konami VRC2a
+    23: 86,  # Konami VRC2b/VRC4e
+    24: 83,  # Konami VRC6a
+    25: 86,  # Konami VRC4b/VRC4d
+    26: 84,  # Konami VRC6b
+    34: 10,  # BNROM
+    66: 12,  # GxROM
+    69: 99,  # Sunsoft FME-7 / 5B
+    73: 95,  # Konami VRC3
+    75: 100, # Konami VRC1
+    85: 89,  # Konami VRC7
+    118: 2,  # TxSROM
+    119: 2,  # TQROM
+    159: 94, # Bandai FCG
+    185: 8,  # CNROM with protection
 }
 
 GB_CARTRIDGE_TYPES: Dict[int, Tuple[str, bool, bool]] = {
@@ -595,8 +578,7 @@ def build_snes_vc_data_bin(
     struct.pack_into("<I", hdr, 0x1C, 0x00000000)
     struct.pack_into("<I", hdr, 0x20, total_len)
     hdr[0x24:0x30] = b"KTR-UAEE\x00\x00\x00\x00"
-    hdr[0x30] = 0x3C
-    struct.pack_into("<I", hdr, 0x31, rom_len)
+    struct.pack_into("<I", hdr, 0x30, 0x0000003C | ((rom_len & 0xFF0000) << 8))
     struct.pack_into("<H", hdr, 0x40, 0x1564 if is_hirom else 0x1464)
     struct.pack_into("<II", hdr, 0x50, 3, 1)
     return bytes(hdr) + clean_rom
