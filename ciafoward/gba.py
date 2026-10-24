@@ -147,6 +147,7 @@ REGION_MAP: Dict[str, str] = {
     "S": "Spain",
     "U": "Australia",
     "K": "Korea",
+    "C": "China",
 }
 
 
@@ -180,6 +181,8 @@ class GBARomInfo:
     lookup_crc32: int = 0
     product_prefix: str = "CTR-P"
     core_version: int = 0x00000202
+    banner_title: str = ""
+    banner_publisher: str = ""
 
     @property
     def crc32_hex(self) -> str:

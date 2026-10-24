@@ -27,7 +27,13 @@ from ciafoward.cia import (
     package_gba_to_cia,
     verify_and_inspect_cia,
 )
-from ciafoward.consoles import GB_LOGO_PREFIX, convert_ines_to_tnes, parse_rom_auto
+from ciafoward.consoles import (
+    GB_LOGO_PREFIX,
+    convert_ines_to_tnes,
+    crc16_nds,
+    extract_nds_banner_icon,
+    parse_rom_auto,
+)
 from ciafoward.gba import (
     NINTENDO_LOGO_PREFIX,
     SaveTypeID,
@@ -338,6 +344,106 @@ class TestCiaFoward(unittest.TestCase):
             z_info, z_bytes = parse_rom_auto(str(zip_path))
             self.assertEqual(z_info.system, "md")
             self.assertEqual(len(z_bytes), len(md_rom))
+
+    def test_nds_rom_and_cia_modes(self) -> None:
+        # Build synthetic Nintendo DS (.nds) ROM with valid header, logo, and 0x840 banner
+        nds_rom = bytearray(64 * 1024)
+        nds_rom[0x000:0x00C] = b"NEW MARIO\x00\x00\x00"
+        nds_rom[0x00C:0x010] = b"A2DE"
+        nds_rom[0x010:0x012] = b"01"
+        nds_rom[0x012] = 0x00  # NDS unit code
+        nds_rom[0x014] = 0x07  # 128 Mbit capacity code
+        struct.pack_into("<I", nds_rom, 0x068, 0x0200)  # Banner offset = 0x0200
+        struct.pack_into("<I", nds_rom, 0x080, len(nds_rom))
+        nds_rom[0x0C0 : 0x0C0 + len(NINTENDO_LOGO_PREFIX)] = NINTENDO_LOGO_PREFIX
+        struct.pack_into("<H", nds_rom, 0x15C, 0xCF56)  # Nintendo Logo CRC16
+        struct.pack_into("<H", nds_rom, 0x15E, crc16_nds(bytes(nds_rom[0x000:0x15E])))
+
+        # Populate NDS Banner at 0x0200..0x0A40
+        banner = bytearray(0x840)
+        struct.pack_into("<H", banner, 0x00, 0x0001)
+        # 4bpp tiles (0x20..0x220): fill with palette index 1 and 2
+        for i in range(0x20, 0x220):
+            banner[i] = 0x21
+        # Palette (0x220..0x240): color 1 = bright red, color 2 = bright blue
+        struct.pack_into("<H", banner, 0x222, 0x001F)  # Red in BGR555
+        struct.pack_into("<H", banner, 0x224, 0x7C00)  # Blue in BGR555
+        # English title at 0x340..0x440 (UTF-16LE)
+        en_str = "New Super Mario Bros.\nNintendo".encode("utf-16le")
+        banner[0x340 : 0x340 + len(en_str)] = en_str
+        struct.pack_into("<H", banner, 0x02, crc16_nds(bytes(banner[0x20:0x840])))
+        nds_rom[0x0200 : 0x0200 + 0x840] = banner
+
+        icon_img = extract_nds_banner_icon(bytes(nds_rom))
+        self.assertIsNotNone(icon_img)
+        assert icon_img is not None
+        self.assertEqual((icon_img.width, icon_img.height), (32, 32))
+        self.assertEqual(icon_img.pixels[0], (255, 0, 0, 255))
+        self.assertEqual(icon_img.pixels[1], (0, 0, 255, 255))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nds_path = Path(tmpdir) / "nsmb.nds"
+            nds_path.write_bytes(bytes(nds_rom))
+
+            rom_info, clean_bytes = parse_rom_auto(str(nds_path))
+            self.assertEqual(rom_info.system, "nds")
+            self.assertEqual(rom_info.game_code, "A2DE")
+            self.assertTrue(rom_info.header_valid)
+            self.assertTrue(rom_info.logo_valid)
+            self.assertEqual(rom_info.banner_title, "New Super Mario Bros.")
+            self.assertEqual(rom_info.banner_publisher, "Nintendo")
+
+            meta = resolve_game_metadata(rom_info, download_artwork=False, use_online_db=False)
+            self.assertEqual(meta.short_title, "New Super Mario Bros.")
+            self.assertEqual(meta.publisher, "Nintendo")
+            self.assertEqual(meta.source, "rom-banner")
+
+            # 1. Test default lightweight forwarder NDS CIA (no ROM duplication)
+            forwarder_cia = Path(tmpdir) / "nsmb_forwarder.cia"
+            res_fwd = package_gba_to_cia(
+                rom_bytes=clean_bytes,
+                rom_info=rom_info,
+                metadata=meta,
+                output_cia_path=str(forwarder_cia),
+                download_templates=False,
+            )
+            self.assertEqual(res_fwd.code_stub_source, "nds-bootstrap-3ds-forwarder")
+            self.assertFalse(res_fwd.nds_rom_embedded)
+            self.assertEqual(res_fwd.nds_target_path, "sd:/roms/nds/nsmb.nds")
+            rep1 = verify_and_inspect_cia(str(forwarder_cia))
+            self.assertEqual(rep1["system"], "nds")
+            self.assertTrue(rep1["all_hashes_valid"])
+            self.assertTrue(rep1["romfs_ivfc_valid"])
+            self.assertTrue(rep1["agb_firm_ready"])
+            self.assertNotIn("rom.nds", rep1["romfs_files"])
+            self.assertIn("bootstrap.cia", rep1["romfs_files"])
+            self.assertIn("_nds/nds-bootstrap-release.nds", rep1["romfs_files"])
+            self.assertEqual(rep1["nds_target_path"], "sd:/roms/nds/nsmb.nds")
+            self.assertFalse(rep1["nds_rom_embedded"])
+
+            # 2. Test --embed-rom standalone NDS CIA
+            standalone_cia = Path(tmpdir) / "nsmb_standalone.cia"
+            res_standalone = package_gba_to_cia(
+                rom_bytes=clean_bytes,
+                rom_info=rom_info,
+                metadata=meta,
+                output_cia_path=str(standalone_cia),
+                download_templates=False,
+                embed_nds_rom=True,
+                nds_sd_path="/roms/nds/custom_nsmb.nds",
+            )
+            self.assertEqual(res_standalone.code_stub_source, "nds-bootstrap-3ds-standalone")
+            self.assertTrue(res_standalone.nds_rom_embedded)
+            rep2 = verify_and_inspect_cia(str(standalone_cia))
+            self.assertEqual(rep2["system"], "nds")
+            self.assertTrue(rep2["all_hashes_valid"])
+            self.assertTrue(rep2["romfs_ivfc_valid"])
+            self.assertTrue(rep2["agb_firm_ready"])
+            self.assertIn("rom.nds", rep2["romfs_files"])
+            self.assertIn("bootstrap.cia", rep2["romfs_files"])
+            self.assertEqual(rep2["nds_target_path"], "sd:/roms/nds/custom_nsmb.nds")
+            self.assertTrue(rep2["nds_rom_embedded"])
+            self.assertEqual(rep2["embedded_gba"].game_code, "A2DE")
 
 
 if __name__ == "__main__":

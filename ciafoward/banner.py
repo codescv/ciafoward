@@ -105,7 +105,7 @@ def build_smdh(
             flags = 0x00001195
         elif sys_key in ("gb", "gbc", "nes"):
             flags = 0x00000195
-        elif sys_key == "md":
+        elif sys_key in ("md", "nds"):
             flags = 0x00000595
         else:
             flags = 0x00000425
@@ -324,6 +324,8 @@ def build_gba_chime_bcwav(
         f1, f2, split_t = 659.25, 1318.51, 0.14
     elif sys_key == "md":
         f1, f2, split_t = 587.33, 880.00, 0.16
+    elif sys_key == "nds":
+        f1, f2, split_t = 783.99, 1174.66, 0.12
     else:
         f1, f2, split_t = 987.77, 1318.51, 0.11
 

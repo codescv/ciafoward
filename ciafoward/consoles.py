@@ -17,9 +17,19 @@ import struct
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-from .gba import GBARomInfo, SaveTypeID, generate_title_id, parse_gba_rom
+from .gba import (
+    NINTENDO_LOGO_PREFIX,
+    REGION_MAP,
+    GBARomInfo,
+    SaveTypeID,
+    generate_title_id,
+    parse_gba_rom,
+)
+
+if TYPE_CHECKING:
+    from .graphics import RGBA, RGBAImage
 
 GB_LOGO_PREFIX = bytes(
     [
@@ -81,6 +91,15 @@ SYSTEM_SPECS: Dict[str, Dict[str, object]] = {
         "extensions": (".md", ".gen", ".smd", ".bin"),
         "product_prefix": "GEN-P",
         "default_publisher": "SEGA",
+        "core_version": 0x00000002,
+    },
+    "nds": {
+        "name": "Nintendo DS",
+        "short_label": "NINTENDO DS",
+        "libretro_db": "Nintendo - Nintendo DS",
+        "extensions": (".nds", ".srl", ".dsi", ".ids"),
+        "product_prefix": "NTR-P",
+        "default_publisher": "Nintendo",
         "core_version": 0x00000002,
     },
 }
@@ -253,10 +272,14 @@ def detect_console_system(
         sys_key = "snes"
     elif ext in (".md", ".gen", ".smd", ".bin"):
         sys_key = "md"
+    elif ext in (".nds", ".srl", ".dsi", ".ids"):
+        sys_key = "nds"
     else:
         # Magic-byte fallback
         if rom_bytes[:4] in (b"NES\x1a", b"TNES"):
             sys_key = "nes"
+        elif len(rom_bytes) >= 0x160 and rom_bytes[0x0C0 : 0x0C0 + len(NINTENDO_LOGO_PREFIX)] == NINTENDO_LOGO_PREFIX:
+            sys_key = "nds"
         elif len(rom_bytes) > 0x150 and rom_bytes[0x104 : 0x104 + len(GB_LOGO_PREFIX)] == GB_LOGO_PREFIX:
             sys_key = "gbc" if rom_bytes[0x143] in (0x80, 0xC0) else "gb"
         elif len(rom_bytes) > 0x200 and rom_bytes[0x100:0x104] == b"SEGA":
@@ -748,6 +771,217 @@ def parse_md_rom(
     )
 
 
+def crc16_nds(data: bytes) -> int:
+    """Compute the standard Nintendo DS CRC16-MODBUS checksum (`init=0xFFFF`, `poly=0xA001`)."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc & 0xFFFF
+
+
+def extract_nds_banner_titles(rom_bytes: bytes) -> Dict[str, List[str]]:
+    """
+    Extract UTF-16LE multi-language title lines from a Nintendo DS ROM's embedded Icon/Title Banner:
+      `0x240`: Japanese (`jpn`), `0x340`: English (`eng`), `0x440`: French (`fra`),
+      `0x540`: German (`ger`), `0x640`: Italian (`ita`), `0x740`: Spanish (`spa`),
+      `0x840`: Chinese (`chn`, version >= 2), `0x940`: Korean (`kor`, version >= 3).
+    """
+    if len(rom_bytes) < 0x06C:
+        return {}
+    (banner_off,) = struct.unpack_from("<I", rom_bytes, 0x068)
+    if banner_off < 0x200 or len(rom_bytes) < banner_off + 0x840:
+        return {}
+
+    (ver,) = struct.unpack_from("<H", rom_bytes, banner_off)
+    ver_low = ver & 0xFF
+    if ver_low not in (0x01, 0x02, 0x03, 0x103):
+        return {}
+
+    langs = ["jpn", "eng", "fra", "ger", "ita", "spa"]
+    if ver_low >= 2 and len(rom_bytes) >= banner_off + 0x940:
+        langs.append("chn")
+    if ver_low >= 3 and len(rom_bytes) >= banner_off + 0xA40:
+        langs.append("kor")
+
+    out: Dict[str, List[str]] = {}
+    for idx, lang in enumerate(langs):
+        slot_off = banner_off + 0x240 + idx * 0x100
+        raw_slot = rom_bytes[slot_off : slot_off + 0x100]
+        text = raw_slot.decode("utf-16le", errors="ignore").split("\x00", 1)[0].strip()
+        if text:
+            lines = [ln.strip() for ln in text.replace("\r\n", "\n").split("\n") if ln.strip()]
+            if lines:
+                out[lang] = lines
+    return out
+
+
+def extract_nds_banner_icon(rom_bytes: bytes) -> Optional[RGBAImage]:
+    """
+    Decode the 32x32 4bpp tiled cartridge icon and 16-color BGR555 palette from a Nintendo DS ROM's
+    embedded Icon/Title Banner (`banner_offset + 0x020..0x240`).
+    Returns a 32x32 `RGBAImage`, or `None` if no valid banner icon is present.
+    """
+    from .graphics import RGBAImage
+
+    if len(rom_bytes) < 0x06C:
+        return None
+    (banner_off,) = struct.unpack_from("<I", rom_bytes, 0x068)
+    if banner_off < 0x200 or len(rom_bytes) < banner_off + 0x240:
+        return None
+
+    tile_bytes = rom_bytes[banner_off + 0x020 : banner_off + 0x220]
+    pal_words = struct.unpack_from("<16H", rom_bytes, banner_off + 0x220)
+    if not any(tile_bytes) and not any(pal_words):
+        return None
+
+    palette: List[RGBA] = []
+    for idx, c in enumerate(pal_words):
+        r = ((c & 0x1F) * 255) // 31
+        g = (((c >> 5) & 0x1F) * 255) // 31
+        b = (((c >> 10) & 0x1F) * 255) // 31
+        palette.append((255, 255, 255, 255) if idx == 0 else (r, g, b, 255))
+
+    pixels: List[RGBA] = [(255, 255, 255, 255)] * (32 * 32)
+    pos = 0
+    for ty in range(4):
+        for tx in range(4):
+            for py in range(8):
+                y = ty * 8 + py
+                for px in range(0, 8, 2):
+                    b_val = tile_bytes[pos]
+                    pos += 1
+                    x = tx * 8 + px
+                    pixels[y * 32 + x] = palette[b_val & 0x0F]
+                    pixels[y * 32 + x + 1] = palette[(b_val >> 4) & 0x0F]
+
+    return RGBAImage(32, 32, pixels)
+
+
+def parse_nds_rom(
+    file_path: str,
+    rom_bytes: bytes,
+    custom_unique_id: Optional[int] = None,
+) -> GBARomInfo:
+    """Parse a Nintendo DS (`.nds`, `.srl`, `.dsi`, `.ids`) ROM header (`0x000..0x200`) and embedded banner."""
+    raw_size = len(rom_bytes)
+    crc32 = zlib.crc32(rom_bytes) & 0xFFFFFFFF
+    md5 = hashlib.md5(rom_bytes).hexdigest().upper()
+    sha1 = hashlib.sha1(rom_bytes).hexdigest().upper()
+
+    if len(rom_bytes) >= 0x160:
+        raw_title = rom_bytes[0x000:0x00C]
+        internal_title = (
+            "".join(chr(b) if 32 <= b <= 126 else " " for b in raw_title.split(b"\x00", 1)[0]).strip()
+            or Path(file_path).stem[:12].upper()
+        )
+        raw_code = rom_bytes[0x00C:0x010]
+        game_code = "".join(chr(b) for b in raw_code if 48 <= b <= 90).strip()
+        raw_maker = rom_bytes[0x010:0x012]
+        maker_code = "".join(chr(b) if 32 <= b <= 126 else "0" for b in raw_maker).strip() or "01"
+        unit_code = rom_bytes[0x012]
+        nds_region_byte = rom_bytes[0x01D]
+        version = rom_bytes[0x01E]
+        (arm9_size,) = struct.unpack_from("<I", rom_bytes, 0x02C)
+        (arm7_size,) = struct.unpack_from("<I", rom_bytes, 0x03C)
+        (banner_off,) = struct.unpack_from("<I", rom_bytes, 0x068)
+        logo_crc, hdr_crc = struct.unpack_from("<HH", rom_bytes, 0x15C)
+        comp_hdr_crc = crc16_nds(rom_bytes[0x000:0x15E])
+        logo_valid = (rom_bytes[0x0C0:0x0D0] == NINTENDO_LOGO_PREFIX) and (logo_crc == 0xCF56)
+        header_valid = logo_valid and (hdr_crc == comp_hdr_crc)
+    else:
+        internal_title = Path(file_path).stem[:12].upper()
+        game_code = ""
+        maker_code = "01"
+        unit_code = 0
+        nds_region_byte = 0
+        version = 0
+        arm9_size = 0
+        arm7_size = 0
+        banner_off = 0
+        hdr_crc = 0
+        comp_hdr_crc = 0
+        logo_valid = False
+        header_valid = False
+
+    if len(game_code) != 4:
+        game_code = _derive_code_from_title(internal_title, crc32, "N")
+
+    if nds_region_byte == 0x80:
+        region = "China"
+    elif nds_region_byte == 0x40:
+        region = "Korea"
+    else:
+        reg_char = game_code[3:4].upper() if len(game_code) >= 4 else "E"
+        region = REGION_MAP.get(reg_char, "USA")
+
+    unit_tag = "DSIWARE" if unit_code == 0x03 else ("TWL_ENHANCED" if unit_code == 0x02 else "NTR_ROM")
+    unit_desc = (
+        "DSiWare / DSi Exclusive"
+        if unit_code == 0x03
+        else ("DSi-Enhanced (TWL)" if unit_code == 0x02 else "Nintendo DS (NTR)")
+    )
+    sdk_features = [unit_tag, f"ARM9_{arm9_size // 1024}KB", f"ARM7_{arm7_size // 1024}KB"]
+    if banner_off >= 0x200 and len(rom_bytes) >= banner_off + 0x840:
+        sdk_features.append("BANNER_ICON")
+
+    banner_titles = extract_nds_banner_titles(rom_bytes)
+    chosen_lines = (
+        banner_titles.get("eng")
+        or banner_titles.get("chn")
+        or banner_titles.get("jpn")
+        or next(iter(banner_titles.values()), [])
+    )
+    banner_title = ""
+    banner_publisher = ""
+    if len(chosen_lines) >= 3:
+        banner_title = f"{chosen_lines[0]}: {chosen_lines[1]}"
+        banner_publisher = chosen_lines[-1]
+    elif len(chosen_lines) == 2:
+        banner_title = chosen_lines[0]
+        banner_publisher = chosen_lines[1]
+    elif len(chosen_lines) == 1:
+        banner_title = chosen_lines[0]
+
+    title_id = generate_title_id(game_code, crc32, custom_unique_id=custom_unique_id)
+    spec = SYSTEM_SPECS["nds"]
+
+    return GBARomInfo(
+        file_path=file_path,
+        raw_size=raw_size,
+        padded_size=raw_size,
+        crc32=crc32,
+        md5=md5,
+        sha1=sha1,
+        internal_title=internal_title,
+        game_code=game_code,
+        maker_code=maker_code,
+        version=version,
+        header_checksum=hdr_crc & 0xFFFF,
+        computed_checksum=comp_hdr_crc & 0xFFFF,
+        header_valid=header_valid,
+        logo_valid=logo_valid,
+        sdk_save_strings=sdk_features,
+        has_rtc=True,
+        save_type_id=SaveTypeID.FLASH_512K_PANASONIC,
+        save_type_name=f"nds-bootstrap 3DS Forwarder ({unit_desc}, SD Card Save)",
+        save_data_size=0x00000000,
+        title_id=title_id,
+        region=region,
+        system="nds",
+        system_name=str(spec["name"]),
+        lookup_crc32=crc32,
+        product_prefix=str(spec["product_prefix"]),
+        core_version=0x00000002,
+        banner_title=banner_title,
+        banner_publisher=banner_publisher,
+    )
+
+
 def parse_rom_auto(
     file_path: str,
     rom_bytes: Optional[bytes] = None,
@@ -757,7 +991,7 @@ def parse_rom_auto(
     force_system: Optional[str] = None,
 ) -> Tuple[GBARomInfo, bytes]:
     """
-    Auto-detect the console system (`.gba`, `.gb`, `.gbc`, `.nes`, `.sfc`/`.smc`, `.md`/`.gen`, or `.zip`),
+    Auto-detect the console system (`.gba`, `.gb`, `.gbc`, `.nes`, `.sfc`/`.smc`, `.md`/`.gen`, `.nds`, or `.zip`),
     parse its ROM header, and return `(rom_info, normalized_rom_bytes)`.
     """
     sys_key, effective_name, clean_bytes = detect_console_system(
@@ -803,6 +1037,15 @@ def parse_rom_auto(
     if sys_key == "md":
         return (
             parse_md_rom(
+                file_path=effective_name,
+                rom_bytes=clean_bytes,
+                custom_unique_id=custom_unique_id,
+            ),
+            clean_bytes,
+        )
+    if sys_key == "nds":
+        return (
+            parse_nds_rom(
                 file_path=effective_name,
                 rom_bytes=clean_bytes,
                 custom_unique_id=custom_unique_id,

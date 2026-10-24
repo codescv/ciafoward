@@ -1,12 +1,13 @@
 # ciafoward (`gba2cia`)
 
-将经典掌机与主机游戏 ROM（**GBA / GB / GBC / NES / SNES / Sega Genesis / `.zip`**）一键打包为 Nintendo 3DS **Virtual Console / Forwarder** 可安装的 `.cia` 桌面图标命令行工具。
+将经典掌机与主机游戏 ROM（**GBA / NDS / GB / GBC / NES / SNES / Sega Genesis / `.zip`**）一键打包为 Nintendo 3DS **Virtual Console / Forwarder** 可安装的 `.cia` 桌面图标命令行工具。
 
 ## 支持的主机平台与运行内核
 
 | 平台 (`--system`) | 支持扩展名 | 3DS 运行内核 / 模拟架构 | 机型要求 |
 |---|---|---|---|
 | **GBA** (`gba`) | `.gba`, `.agb` | **3DS 内置 `AGB_FIRM` 裸机硬件模式** (`CoreVersion = 0x202`, `.CAA` 尾部) | 全系列 3DS / 2DS |
+| **Nintendo DS** (`nds`) | `.nds`, `.srl`, `.dsi`, `.ids` | **`nds-bootstrap` + `NTR_Forwarder` 原生 `TWL_FIRM` 硬件模式**（默认生成不重复占空间的轻量 Forwarder `.cia`，指向 `/roms/nds/<文件名>` 并内置 `_nds` 环境自动安装器；亦可通过 `--embed-rom` 将 ROM 内嵌进 `.cia`） | 全系列 3DS / 2DS |
 | **Game Boy** (`gb`) | `.gb`, `.sgb` | **任天堂官方 3DS GB Virtual Console**（支持下屏点阵绿屏与实机边框切换、存档点） | 全系列 3DS / 2DS |
 | **Game Boy Color** (`gbc`) | `.gbc` | **任天堂官方 3DS GBC Virtual Console**（原生支持 MBC3 实时时钟 RTC 如《宝可梦 金/银/水晶》） | 全系列 3DS / 2DS |
 | **NES / FC** (`nes`) | `.nes` | **任天堂官方 3DS NES Virtual Console**（自动将 iNES 转换为任天堂 `TNES` 映射器格式） | 全系列 3DS / 2DS |
@@ -23,6 +24,7 @@
   - 内置完整的 3DS Retail 证书链、多平台官方 VC 模板与纯 Python 3DS `IVFC` (RomFS) 三级 SHA-256 哈希树构建器，生成的 `.cia` 可直接通过 **FBI** 安装。
 - **智能识别各平台头部与存档类型**：
   - **GBA**：自动扫描 Nintendo SDK 存档标识（`EEPROM_Vxxx`、`SRAM_Vxxx`、`FLASH_Vxxx`、`FLASH512_Vxxx`、`FLASH1M_Vxxx`）与 `SIIRTC_Vxxx` 时钟芯片标识。
+  - **Nintendo DS (`nds`)**：自动解析 NDS 头部 (`0x000..0x15F`)、CRC16 校验以及内置 `0x840` 字节多语言 Banner（自动提取内置 `32x32` 4bpp 像素图标与游戏全名/发行商），默认生成轻量级 Forwarder `.cia`（内置 `bootstrap.cia` 与 `nds-bootstrap` `v2.17.0` 自动部署器，不浪费双倍 ROM 空间）。
   - **GB / GBC**：自动解析 `0x0100..0x014F` 头部、CGB 标志位、MBC1/MBC2/MBC3(RTC)/MBC5 卡带类型与 SRAM 大小。
   - **NES**：自动解析 iNES / NES 2.0 头部与 Mapper 编号，并自动转换为任天堂 3DS VC 专用的 16 字节 `TNES` 头部。
   - **SNES**：自动检测并剥离 512 字节 `.smc` 拷贝机头部，自动识别 `LoROM` (`0x7FC0`) 与 `HiROM` (`0xFFC0`) 并配置官方 VC Preset ID。
@@ -65,6 +67,11 @@ uv run ciafoward --help
 ```bash
 # GBA (原生 AGB_FIRM 硬件模式)
 ciafoward "~/Downloads/Advance Wars (USA) (Rev 1).gba"
+
+# Nintendo DS (默认生成轻量 Forwarder .cia 并提示将 ROM 放入 SD 卡 /roms/nds/；或加 --embed-rom 将 ROM 内嵌进 .cia)
+ciafoward "~/Downloads/New Super Mario Bros. (USA).nds"
+ciafoward "~/Downloads/New Super Mario Bros. (USA).nds" --sd-path "/roms/nds/nsmb.nds"
+ciafoward "~/Downloads/New Super Mario Bros. (USA).nds" --embed-rom
 
 # Game Boy / Game Boy Color (官方 3DS GB/GBC Virtual Console)
 ciafoward "~/Downloads/Tetris (World).gb"
@@ -139,9 +146,11 @@ ciafoward save game.gba vba_eeprom.sav -o 3ds_eeprom.sav --swap-eeprom
 
 | 参数 | 说明 |
 |---|---|
-| `input` | 输入的游戏 ROM 文件路径 (`.gba`, `.gb`, `.gbc`, `.nes`, `.sfc`, `.smc`, `.md`, `.gen`, `.smd`, `.zip`) |
+| `input` | 输入的游戏 ROM 文件路径 (`.gba`, `.nds`, `.srl`, `.dsi`, `.gb`, `.gbc`, `.nes`, `.sfc`, `.smc`, `.md`, `.gen`, `.smd`, `.zip`) |
 | `-o, --output` | 输出的 `.cia` 文件路径 |
-| `--system` | 指定主机平台类型：`auto`（默认自动识别）、`gba`、`gb`、`gbc`、`nes`、`snes`、`md` |
+| `--system` | 指定主机平台类型：`auto`（默认自动识别）、`gba`、`nds`、`gb`、`gbc`、`nes`、`snes`、`md` |
+| `--sd-path` | 仅限 NDS：自定义 ROM 在 3DS SD 卡上的存放路径（默认 `/roms/nds/<ROM文件名>`） |
+| `--embed-rom` | 仅限 NDS：将 `.nds` ROM 本体内嵌进 `.cia`（首次运行自动释放到 SD 卡，会占用双倍空间；默认不内嵌） |
 | `--title` | 自定义游戏显示名称（同时作用于桌面图标与 3D 横幅铭牌） |
 | `--publisher` | 自定义发行商名称（例如 `Nintendo`） |
 | `--year` | 自定义发行年份（例如 `2001`） |

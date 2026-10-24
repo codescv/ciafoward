@@ -24,8 +24,10 @@ from .banner import (
 from .consoles import (
     build_snes_vc_data_bin,
     convert_ines_to_tnes,
+    extract_nds_banner_icon,
     parse_gb_rom,
     parse_md_rom,
+    parse_nds_rom,
     parse_nes_rom,
     parse_snes_rom,
 )
@@ -435,6 +437,8 @@ class CIABuildResult:
     cgfx_header_source: str
     preview_banner_png_path: Optional[str] = None
     preview_icon_png_path: Optional[str] = None
+    nds_target_path: Optional[str] = None
+    nds_rom_embedded: bool = False
 
 
 def package_gba_to_cia(
@@ -448,16 +452,30 @@ def package_gba_to_cia(
     custom_code_path: Optional[str] = None,
     download_templates: bool = True,
     save_preview_dir: Optional[str] = None,
+    nds_sd_path: Optional[str] = None,
+    embed_nds_rom: bool = False,
 ) -> CIABuildResult:
     """
     Full pipeline:
       1. Compose 24x24 & 48x48 VC Icons and build 0x36C0 SMDH
       2. Compose VC Banner and build CBMD (3D GBA VC model or 2D 256x128 RGBA4 + GBA Chime BCWAV)
-      3. Assemble ExeFS `.code` (16-byte Padded GBA ROM at offset 0 + 0x360 .CAA Footer)
+      3. Assemble ExeFS `.code` (16-byte Padded GBA ROM at offset 0 + 0x360 .CAA Footer, or Multi-Console/NDS engine)
       4. Build ExeFS (.code, banner, icon, logo), signed ExHeader, NCCH with RomFS, and final .cia
     """
+    sys_key = (rom_info.system or "gba").lower()
+    nds_icon: Optional[RGBAImage] = None
+    if sys_key == "nds":
+        nds_icon = extract_nds_banner_icon(rom_bytes)
+
     # 1. Build SMDH Icon
-    icon_24, icon_48 = compose_vc_icons(metadata)
+    has_ext_art = bool(
+        (metadata.boxart_path and Path(metadata.boxart_path).is_file())
+        or (metadata.title_screen_path and Path(metadata.title_screen_path).is_file())
+    )
+    icon_24, icon_48 = compose_vc_icons(
+        metadata,
+        source_image=nds_icon if (nds_icon is not None and not has_ext_art) else None,
+    )
     smdh_bytes = build_smdh(
         short_title=metadata.short_title,
         long_title=metadata.long_title,
@@ -514,7 +532,8 @@ def package_gba_to_cia(
         preview_banner_png = str(b_path)
         preview_icon_png = str(i_path)
 
-    sys_key = (rom_info.system or "gba").lower()
+    nds_target_path: Optional[str] = None
+    nds_rom_embedded = False
     if sys_key == "gba":
         # 3a. GBA: Native AGB_FIRM `.code` with 0x360-byte .CAA footer & empty 0x1000 RomFS
         code_bytes, rom_offset, padded_rom_size = build_gbavc_code_section(
@@ -531,7 +550,7 @@ def package_gba_to_cia(
         )
         romfs_bytes = get_romfs_bytes()
     else:
-        # 3b. Multi-Console (GB, GBC, NES, SNES, Genesis): Official 3DS VC or PicoDrive Forwarder
+        # 3b. Multi-Console (GB, GBC, NES, SNES, Genesis, NDS): Official 3DS VC or Forwarder
         tpl = get_console_template(sys_key)
         code_bytes = tpl["code"]
         rom_offset = 0
@@ -591,6 +610,29 @@ def package_gba_to_cia(
             romfs_files["rom_path.txt"] = b"romfs:/rom.md"
             romfs_files["rom.md"] = rom_bytes
             code_src = "picodrive-3ds-forwarder"
+        elif sys_key == "nds":
+            if nds_sd_path:
+                clean_sd = nds_sd_path.strip().replace("\\", "/")
+                if clean_sd.startswith("sdmc:/"):
+                    clean_sd = "sd:/" + clean_sd[6:]
+                elif not clean_sd.startswith("sd:/"):
+                    clean_sd = "sd:/" + clean_sd.lstrip("/")
+                nds_target_path = clean_sd
+            else:
+                orig_name = Path(rom_info.file_path).name
+                if not orig_name.lower().endswith((".nds", ".srl", ".dsi", ".ids")):
+                    orig_name = f"{Path(rom_info.file_path).stem}.nds"
+                nds_target_path = f"sd:/roms/nds/{orig_name}"
+
+            romfs_files["path.txt"] = nds_target_path.encode("utf-8")
+            if embed_nds_rom:
+                romfs_files["rom.nds"] = rom_bytes
+                nds_rom_embedded = True
+                code_src = "nds-bootstrap-3ds-standalone"
+            else:
+                padded_rom_size = 0
+                nds_rom_embedded = False
+                code_src = "nds-bootstrap-3ds-forwarder"
         else:
             raise ValueError(f"Unsupported console system: {sys_key}")
 
@@ -650,6 +692,8 @@ def package_gba_to_cia(
         cgfx_header_source=cgfx_src,
         preview_banner_png_path=preview_banner_png,
         preview_icon_png_path=preview_icon_png,
+        nds_target_path=nds_target_path,
+        nds_rom_embedded=nds_rom_embedded,
     )
 
 
@@ -848,8 +892,20 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
 
     # Detect console system & embedded ROM for non-GBA systems
     detected_system = "gba"
+    nds_target_path: Optional[str] = None
+    nds_rom_embedded = False
     if aci_core_version == 0x00000202 or caa_info.get("magic_ok"):
         detected_system = "gba"
+    elif "rom.nds" in extracted_romfs or "bootstrap.cia" in extracted_romfs or product_code.startswith("NTR-"):
+        detected_system = "nds"
+        nds_rom_embedded = "rom.nds" in extracted_romfs
+        if "path.txt" in extracted_romfs:
+            nds_target_path = extracted_romfs["path.txt"].decode("utf-8", errors="replace").strip()
+        if embedded_gba_info is None and "rom.nds" in extracted_romfs:
+            try:
+                embedded_gba_info = parse_nds_rom("<embedded_in_cia>", extracted_romfs["rom.nds"])
+            except Exception:
+                pass
     elif "rom.md" in extracted_romfs:
         detected_system = "md"
         if embedded_gba_info is None:
@@ -932,6 +988,8 @@ def verify_and_inspect_cia(cia_path: str) -> Dict[str, Any]:
         "smdh": smdh_info,
         "banner": banner_info,
         "embedded_gba": embedded_gba_info,
+        "nds_target_path": nds_target_path,
+        "nds_rom_embedded": nds_rom_embedded,
         "meta_size": len(meta),
     }
 

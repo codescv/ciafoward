@@ -588,6 +588,7 @@ CONSOLE_THEMES: Dict[str, Tuple[str, str, RGB, RGB, RGBA]] = {
     "nes": ("NINTENDO ENT. SYSTEM", "NES", (62, 22, 26), (115, 34, 42), (188, 46, 56, 255)),
     "snes": ("SUPER NINTENDO", "SNS", (42, 36, 78), (76, 65, 142), (112, 92, 196, 255)),
     "md": ("SEGA GENESIS", "GEN", (18, 28, 56), (32, 54, 118), (44, 92, 196, 255)),
+    "nds": ("NINTENDO DS", "NTR", (28, 34, 46), (54, 66, 88), (72, 118, 204, 255)),
 }
 
 

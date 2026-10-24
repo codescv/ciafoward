@@ -37,7 +37,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ciafoward",
         description=(
-            "将多平台经典游戏 (GBA / GB / GBC / NES / SNES / Sega Genesis / .zip) 打包为 "
+            "将多平台经典游戏 (GBA / NDS / GB / GBC / NES / SNES / Sega Genesis / .zip) 打包为 "
             "Nintendo 3DS Virtual Console / Forwarder 可安装的 .cia 格式，支持自动识别存档类型、自动下载封面与游戏元数据。"
         ),
     )
@@ -50,11 +50,11 @@ def _build_parser() -> argparse.ArgumentParser:
     # 1. `build` subcommand (also default when given a ROM file directly)
     build_p = subparsers.add_parser(
         "build",
-        help="将游戏 ROM (.gba/.gb/.gbc/.nes/.sfc/.smc/.md/.gen/.zip) 打包为 3DS .cia 安装包 (默认命令)",
+        help="将游戏 ROM (.gba/.nds/.gb/.gbc/.nes/.sfc/.smc/.md/.gen/.zip) 打包为 3DS .cia 安装包 (默认命令)",
     )
     build_p.add_argument(
         "input",
-        help="输入的游戏 ROM 文件路径 (.gba, .gb, .gbc, .nes, .sfc, .smc, .md, .gen, .smd, .zip)",
+        help="输入的游戏 ROM 文件路径 (.gba, .nds, .srl, .dsi, .gb, .gbc, .nes, .sfc, .smc, .md, .gen, .smd, .zip)",
     )
     build_p.add_argument(
         "-o",
@@ -64,8 +64,17 @@ def _build_parser() -> argparse.ArgumentParser:
     build_p.add_argument(
         "--system",
         default="auto",
-        choices=["auto", "gba", "gb", "gbc", "nes", "snes", "md"],
+        choices=["auto", "gba", "nds", "gb", "gbc", "nes", "snes", "md"],
         help="指定主机平台类型 (默认: auto 自动根据扩展名与 ROM 魔数识别)",
+    )
+    build_p.add_argument(
+        "--sd-path",
+        help="仅限 NDS: 自定义 ROM 在 3DS SD 卡上的存放路径 (默认: /roms/nds/<ROM文件名>)",
+    )
+    build_p.add_argument(
+        "--embed-rom",
+        action="store_true",
+        help="仅限 NDS: 将 .nds ROM 本体一并内嵌进 .cia（首次运行自动释放到 SD 卡，但会占用双倍 SD 卡空间；默认不内嵌）",
     )
     build_p.add_argument("--title", help="自定义游戏显示名称 (Short & Long Title)")
     build_p.add_argument("--publisher", help="自定义发行商名称 (例如 Nintendo)")
@@ -242,6 +251,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(f"      文件名称     : {Path(rom_info.file_path).name}")
         print(f"      原始大小     : {_format_size(rom_info.raw_size)} -> 打包载荷 {_format_size(rom_info.padded_size)}")
         print(f"      内部标题     : {rom_info.internal_title}")
+        if rom_info.banner_title:
+            print(
+                f"      内置横幅标题 : {rom_info.banner_title}"
+                + (f" ({rom_info.banner_publisher})" if rom_info.banner_publisher else "")
+            )
         print(f"      游戏编号     : {rom_info.game_code} ({rom_info.product_code}) | 区域: {rom_info.region}")
         print(f"      厂商代码     : {rom_info.maker_code} | 修订版本: Rev {rom_info.version}")
         print(f"      CRC32 校验   : {rom_info.crc32_hex} | 头部校验: {'通过' if rom_info.header_valid else '非标准'}")
@@ -304,6 +318,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         custom_code_path=args.base_code,
         download_templates=not args.offline,
         save_preview_dir=args.preview_dir,
+        nds_sd_path=getattr(args, "sd_path", None),
+        embed_nds_rom=bool(getattr(args, "embed_rom", False)),
     )
 
     verification = verify_and_inspect_cia(result.output_cia_path)
@@ -330,6 +346,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                     "title_screen_path": metadata.title_screen_path,
                     "preview_banner_png": result.preview_banner_png_path,
                     "preview_icon_png": result.preview_icon_png_path,
+                    "nds_sd_path": result.nds_target_path,
+                    "nds_rom_embedded": result.nds_rom_embedded,
                     "verification": {
                         "all_hashes_valid": verification["all_hashes_valid"],
                         "romfs_ivfc_valid": verification.get("romfs_ivfc_valid", True),
@@ -355,12 +373,27 @@ def cmd_build(args: argparse.Namespace) -> int:
         f"      容器完整性   : {'全部 SHA-256 校验通过' if verification['all_hashes_valid'] else '校验异常'} "
         f"| {mode_label}: {'已就绪' if verification['agb_firm_ready'] else '异常'}"
     )
+    if rom_info.system == "nds" and result.nds_target_path:
+        sd_rel = result.nds_target_path[3:] if result.nds_target_path.startswith("sd:") else result.nds_target_path
+        if result.nds_rom_embedded:
+            print(f"      NDS 打包模式 : 全能内嵌模式 (ROM 已内嵌，首次启动将自动释放至 SD 卡 {sd_rel})")
+        else:
+            print("      NDS 打包模式 : 轻量 Forwarder 模式 (不重复占用 ROM 空间，已内置 nds-bootstrap 自动安装器)")
+            print(f"      SD 卡 ROM 路径: {sd_rel} ({result.nds_target_path})")
     if result.preview_banner_png_path:
         print(f"      横幅预览图   : {result.preview_banner_png_path}")
     if result.preview_icon_png_path:
         print(f"      图标预览图   : {result.preview_icon_png_path}")
     print("=" * 68)
-    print("提示: 将生成的 .cia 文件复制到 3DS SD 卡，使用 FBI 安装即可在桌面直接运行！")
+    if rom_info.system == "nds" and result.nds_target_path and not result.nds_rom_embedded:
+        sd_rel = result.nds_target_path[3:] if result.nds_target_path.startswith("sd:") else result.nds_target_path
+        print("【NDS 安装与运行提示】:")
+        print(f"  1. 请将 ROM 文件复制到 3DS SD 卡的: `{sd_rel}`")
+        print(f"     (游戏存档将由 nds-bootstrap 自动创建在 SD 卡 `{Path(sd_rel).parent}/saves/` 目录下)")
+        print("  2. 将生成的 `.cia` 文件复制到 SD 卡，使用 FBI 安装后即可在桌面直接点击运行！")
+        print("     (首次启动时会自动安装并配置好 `_nds/nds-bootstrap` 环境，无需手动拷贝 `_nds` 文件夹)")
+    else:
+        print("提示: 将生成的 .cia 文件复制到 3DS SD 卡，使用 FBI 安装即可在桌面直接运行！")
     return 0
 
 
@@ -402,8 +435,13 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         if info.get("embedded_gba"):
             g: GBARomInfo = info["embedded_gba"]
             print(
-                f"  内嵌 GBA ROM   : 标题='{g.internal_title}' | 编号={g.game_code} | "
+                f"  内嵌游戏 ROM   : [{g.system.upper()}] 标题='{g.internal_title}' | 编号={g.game_code} | "
                 f"厂商={g.maker_code} | 头部校验={'通过' if g.header_valid else '非标准'}"
+            )
+        if info.get("nds_target_path"):
+            print(
+                f"  NDS SD 路径    : {info['nds_target_path']} "
+                f"({'内嵌 ROM 模式' if info.get('nds_rom_embedded') else '轻量 Forwarder 模式'})"
             )
         print("=" * 68)
         return 0
@@ -419,6 +457,11 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print(f"  系统平台       : {rom_info.system_name} ({rom_info.system.upper()})")
         print(f"  原始大小       : {_format_size(rom_info.raw_size)} (填充后: {_format_size(rom_info.padded_size)})")
         print(f"  内部标题       : {rom_info.internal_title}")
+        if rom_info.banner_title:
+            print(
+                f"  内置横幅标题   : {rom_info.banner_title}"
+                + (f" ({rom_info.banner_publisher})" if rom_info.banner_publisher else "")
+            )
         print(f"  游戏编号       : {rom_info.game_code} ({rom_info.region}) | 厂商代码: {rom_info.maker_code}")
         print(f"  CRC32 / SHA1   : {rom_info.crc32_hex} / {rom_info.sha1}")
         print(f"  硬件/存档特征  : {', '.join(rom_info.sdk_save_strings) or '无'}")

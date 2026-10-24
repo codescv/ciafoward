@@ -292,6 +292,13 @@ def candidate_nointro_names(
             add(f"{hyph_stem} ({rom_info.region})")
             add(f"{hyph_stem} (Japan)")
 
+    if rom_info.banner_title:
+        add(f"{rom_info.banner_title} ({rom_info.region})")
+        add(f"{rom_info.banner_title} (USA)")
+        add(f"{rom_info.banner_title} (Japan)")
+        add(f"{rom_info.banner_title} (Europe)")
+        add(rom_info.banner_title)
+
     if rom_info.internal_title:
         title_cased = rom_info.internal_title.title()
         add(f"{title_cased} ({rom_info.region})")
@@ -497,9 +504,20 @@ def resolve_game_metadata(
     cache_dir = get_cache_dir()
     sys_key = (rom_info.system or "gba").lower()
     spec = SYSTEM_SPECS.get(sys_key, SYSTEM_SPECS["gba"])
-    default_years = {"gba": "2001", "gb": "1989", "gbc": "1998", "nes": "1985", "snes": "1991", "md": "1989"}
+    default_years = {
+        "gba": "2001",
+        "gb": "1989",
+        "gbc": "1998",
+        "nes": "1985",
+        "snes": "1991",
+        "md": "1989",
+        "nds": "2004",
+    }
     prefix3 = rom_info.game_code[:3].upper()
-    publisher = MAKER_CODES.get(rom_info.maker_code.upper(), str(spec["default_publisher"]))
+    publisher = MAKER_CODES.get(
+        rom_info.maker_code.upper(),
+        rom_info.banner_publisher or str(spec["default_publisher"]),
+    )
     release_year = default_years.get(sys_key, "2001")
     display_title = ""
     canonical_name = ""
@@ -535,15 +553,18 @@ def resolve_game_metadata(
                 release_year = online_info["release_year"]
             source = "libretro-db"
 
-    # 4. Fallback to cleaned filename or ROM internal 12-char title
+    # 4. Fallback to embedded NDS banner title, cleaned filename, or ROM internal 12-char title
     if not display_title:
         clean_stem = clean_display_title_from_nointro(stem)
-        if clean_stem:
+        if rom_info.banner_title:
+            display_title = rom_info.banner_title
+            source = "rom-banner"
+        elif clean_stem:
             display_title = clean_stem
         elif rom_info.internal_title:
             display_title = rom_info.internal_title.title()
         else:
-            display_title = f"GBA Game ({rom_info.game_code})"
+            display_title = f"{spec['name']} ({rom_info.game_code})"
 
     if not canonical_name:
         canonical_name = f"{display_title} ({rom_info.region})"
