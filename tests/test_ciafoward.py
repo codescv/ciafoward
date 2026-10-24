@@ -51,7 +51,7 @@ from ciafoward.graphics import (
 from ciafoward.metadata import resolve_game_metadata
 from ciafoward.romfs import build_romfs, extract_romfs, verify_romfs_ivfc
 from ciafoward.save_tool import convert_save_for_3ds, swap_eeprom_8byte_blocks
-from ciafoward.templates import get_romfs_bytes
+from ciafoward.templates import get_console_template, get_romfs_bytes
 
 
 def make_synthetic_gba_rom(
@@ -420,6 +420,9 @@ class TestCiaFoward(unittest.TestCase):
             self.assertIn("_nds/nds-bootstrap-release.nds", rep1["romfs_files"])
             self.assertEqual(rep1["nds_target_path"], "sd:/roms/nds/nsmb.nds")
             self.assertFalse(rep1["nds_rom_embedded"])
+            sdcard_nds = get_console_template("nds")["romfs_files"]["_nds/ntr-forwarder/sdcard.nds"]
+            self.assertEqual(struct.unpack_from("<I", sdcard_nds, 0x327C4)[0], 0xE1A00000)
+            self.assertEqual(struct.unpack_from("<I", sdcard_nds, 0x33128)[0], 0xE3A03000)
 
             # 2. Test --embed-rom standalone NDS CIA
             standalone_cia = Path(tmpdir) / "nsmb_standalone.cia"
