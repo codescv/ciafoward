@@ -69,6 +69,8 @@ def build_smdh(
     publisher: str,
     icon_24x24: RGBAImage,
     icon_48x48: RGBAImage,
+    system: str = "gba",
+    flags: Optional[int] = None,
 ) -> bytes:
     """
     Build a 0x36C0-byte (14,016-byte) 3DS SMDH icon & metadata file.
@@ -97,8 +99,17 @@ def build_smdh(
     struct.pack_into("<I", smdh, 0x2018, 0x7FFFFFFF)     # Region Lockout: Region Free
     struct.pack_into("<I", smdh, 0x201C, 0x00000000)     # Match Maker ID
     struct.pack_into("<Q", smdh, 0x2020, 0x0000000000000000)
-    # Flags: 0x00000425 = Visible (0x01) | Allow 3D (0x04) | Record Usage (0x20) | Disable Save Data Backup (0x400)
-    struct.pack_into("<I", smdh, 0x2028, 0x00000425)
+    if flags is None:
+        sys_key = (system or "gba").lower()
+        if sys_key == "snes":
+            flags = 0x00001195
+        elif sys_key in ("gb", "gbc", "nes"):
+            flags = 0x00000195
+        elif sys_key == "md":
+            flags = 0x00000595
+        else:
+            flags = 0x00000425
+    struct.pack_into("<I", smdh, 0x2028, flags)
     struct.pack_into("<H", smdh, 0x202C, 0x0000)         # EULA Version
 
     smdh[0x2040:0x24C0] = encode_rgb565_morton_icon(icon_24x24.to_rgb_list(), 24)
