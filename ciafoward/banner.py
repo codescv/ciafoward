@@ -9,8 +9,23 @@ import math
 import struct
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .graphics import RGB, RGBA, RGBAImage, draw_text, resize_rgba
-from .templates import get_banner_3d_vc_cgfx_lz11, get_banner_cgfx_header
+from .graphics import (
+    CONSOLE_TEMPLATE_OVERRIDES,
+    GENRE_TEMPLATES,
+    RGB,
+    RGBA,
+    RGBAImage,
+    TemplateTheme,
+    draw_border,
+    draw_text,
+    fill_rect,
+    resize_rgba,
+)
+from .templates import (
+    get_banner_3d_vc_cgfx_lz11,
+    get_banner_cgfx_header,
+    get_console_banner_cgfx,
+)
 
 _MORTON_XY: List[Tuple[int, int]] = [
     (
@@ -193,10 +208,62 @@ def encode_la8_morton(img: RGBAImage) -> bytes:
     return bytes(out)
 
 
-def compress_lz11(data: bytes) -> bytes:
+def encode_rgb565_morton_image(img: RGBAImage) -> bytes:
+    """
+    Encode an arbitrary-dimension (multiples of 8) RGBAImage into PICA200 RGB565 Morton-tiled bytes.
+    """
+    w, h = img.width, img.height
+    px = img.pixels
+    out = bytearray(w * h * 2)
+    pos = 0
+    for ty in range(0, h, 8):
+        for tx in range(0, w, 8):
+            for x, y in _MORTON_XY:
+                r, g, b, _ = px[(ty + y) * w + (tx + x)]
+                rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+                struct.pack_into("<H", out, pos, rgb565)
+                pos += 2
+    return bytes(out)
+
+
+def decode_rgb565_morton_image(data: bytes, w: int, h: int, offset: int = 0) -> RGBAImage:
+    """Decode a PICA200 RGB565 Morton-tiled texture (w x h) into an RGBAImage."""
+    img = RGBAImage(w, h)
+    pos = offset
+    for ty in range(0, h, 8):
+        for tx in range(0, w, 8):
+            for x, y in _MORTON_XY:
+                (v,) = struct.unpack_from("<H", data, pos)
+                pos += 2
+                r = ((v >> 11) & 0x1F) * 255 // 31
+                g = ((v >> 5) & 0x3F) * 255 // 63
+                b = (v & 0x1F) * 255 // 31
+                img.pixels[(ty + y) * w + (tx + x)] = (r, g, b, 255)
+    return img
+
+
+def decode_rgba8_morton_image(data: bytes, w: int, h: int, offset: int = 0) -> RGBAImage:
+    """Decode a PICA200 RGBA8 ([A, B, G, R]) Morton-tiled texture (w x h) into an RGBAImage."""
+    img = RGBAImage(w, h)
+    pos = offset
+    for ty in range(0, h, 8):
+        for tx in range(0, w, 8):
+            for x, y in _MORTON_XY:
+                a, b, g, r = data[pos : pos + 4]
+                pos += 4
+                img.pixels[(ty + y) * w + (tx + x)] = (r, g, b, a)
+    return img
+
+
+def compress_lz11(
+    data: bytes,
+    literal_range: Optional[Tuple[int, int]] = None,
+) -> bytes:
     """
     Fast Nintendo LZ11 (0x11) compressor using a 3-byte prefix hash chain (4 KiB window),
     padded to 4-byte alignment as required by 3DS CBMD banners.
+    If `literal_range=(start, end)` is provided, bytes in `start..end` are emitted as raw
+    literals and never matched by backreferences, enabling O(1) locale slot patching.
     """
     size = len(data)
     if size < (1 << 24):
@@ -204,6 +271,7 @@ def compress_lz11(data: bytes) -> bytes:
     else:
         out = bytearray([0x11, 0, 0, 0]) + struct.pack("<I", size)
 
+    lit_s, lit_e = literal_range if literal_range is not None else (-1, -1)
     chains: Dict[bytes, List[int]] = {}
     pos = 0
     while pos < size:
@@ -214,23 +282,28 @@ def compress_lz11(data: bytes) -> bytes:
             if pos >= size:
                 break
             best_len, best_disp = 0, 0
-            key = data[pos : pos + 3]
-            candidates = chains.get(key, ()) if len(key) == 3 else ()
-            max_len = min(0x10110, size - pos)
-            for cand in reversed(candidates[-48:]):
-                disp = pos - cand
-                if disp > 0x1000:
-                    break
-                length = 3
-                while length < max_len and data[cand + length] == data[pos + length]:
-                    length += 1
-                if length > best_len:
-                    best_len, best_disp = length, disp
-                    if length == max_len:
-                        break
+            if not (lit_s <= pos < lit_e):
+                key = data[pos : pos + 3]
+                candidates = chains.get(key, ()) if len(key) == 3 else ()
+                max_len = min(0x10110, size - pos)
+                if pos < lit_s:
+                    max_len = min(max_len, lit_s - pos)
+                if max_len >= 3:
+                    for cand in reversed(candidates[-48:]):
+                        disp = pos - cand
+                        if disp > 0x1000:
+                            break
+                        length = 3
+                        while length < max_len and data[cand + length] == data[pos + length]:
+                            length += 1
+                        if length > best_len:
+                            best_len, best_disp = length, disp
+                            if length == max_len:
+                                break
             step = best_len if best_len >= 3 else 1
             for p in range(pos, min(pos + step, size - 2)):
-                chains.setdefault(data[p : p + 3], []).append(p)
+                if p + 3 <= lit_s or p >= lit_e:
+                    chains.setdefault(data[p : p + 3], []).append(p)
             if best_len >= 3:
                 flags |= 0x80 >> bit
                 d = best_disp - 1
@@ -379,54 +452,80 @@ def build_gba_chime_bcwav(
     return bytes(cwav_hdr + info + data_blk + pcm)
 
 
-def build_3d_vc_cgfx(
-    screen_img: RGBAImage,
-    short_title: str = "GBA Virtual Console",
-    subtitle: str = "Nintendo",
-    cgfx_3d_lz11: Optional[bytes] = None,
+def _encode_etc1_common3_body(
+    dark_col: RGB,
+    trim_col: RGB,
+    body_col: RGB,
 ) -> bytes:
     """
-    Patch the authentic 3D GBA Virtual Console `common` CGFX in-place:
-      - `COMMON1` (128x128 RGBA8 + 4 mipmaps = 0x15500 bytes at 0x5880): GBA screen frame
-      - `COMMON2` (256x64 LA8 = 0x8000 bytes at 0x1AD80): Virtual Console title plate
-    Returns the uncompressed 172,416-byte CGFX buffer.
+    Encode the 128x128 (0x2000-byte) PICA200 ETC1 texture `COMMON3` for the 3D Virtual Console
+    casing (`x=0..27` dark side/rear, `x=28..31` trim stripe, `x=32..127` main console shell).
     """
-    if cgfx_3d_lz11 is None:
-        cgfx_3d_lz11, _ = get_banner_3d_vc_cgfx_lz11()
-    cgfx = bytearray(decompress_lz11(cgfx_3d_lz11))
-
-    # 1. Decode COMMON1 (128x128 RGBA8 at 0x5880)
-    frame_img = RGBAImage(128, 128)
-    pos = 0x5880
+    out = bytearray(0x2000)
+    pos = 0
     for ty in range(0, 128, 8):
         for tx in range(0, 128, 8):
-            for x, y in _MORTON_XY:
-                a, b, g, r = cgfx[pos : pos + 4]
-                frame_img.pixels[(ty + y) * 128 + (tx + x)] = (r, g, b, a)
-                pos += 4
+            for sb_x, _sb_y in ((0, 0), (4, 0), (0, 4), (4, 4)):
+                bx = tx + sb_x
+                if bx < 28:
+                    r, g, b = dark_col
+                elif bx < 32:
+                    r, g, b = trim_col
+                else:
+                    r, g, b = body_col
+                r5 = max(0, min(31, (r * 31 + 127) // 255))
+                g5 = max(0, min(31, (g * 31 + 127) // 255))
+                b5 = max(0, min(31, (b * 31 + 127) // 255))
+                high = (r5 << 27) | (g5 << 19) | (b5 << 11) | 0x02
+                struct.pack_into("<II", out, pos, 0x00000000, high)
+                pos += 8
+    return bytes(out)
 
-    # Composite screen_img into inner screen box (6, 25) .. (122, 103) -> 116x78
-    fit = resize_rgba(screen_img, 116, 78)
-    for y in range(78):
-        for x in range(116):
-            orig_r, orig_g, orig_b, _ = frame_img.pixels[(25 + y) * 128 + (6 + x)]
-            if abs(orig_r - 126) + abs(orig_g - 100) + abs(orig_b - 197) > 45:
-                sr, sg, sb, _ = fit.pixels[y * 116 + x]
-                frame_img.pixels[(25 + y) * 128 + (6 + x)] = (sr, sg, sb, 255)
 
-    # Encode all 5 mipmap levels of COMMON1 (128, 64, 32, 16, 8 -> 0x15500 bytes)
-    mip_bytes = bytearray()
-    w, h = 128, 128
-    while w >= 8 and h >= 8:
-        level_img = frame_img if (w == 128 and h == 128) else resize_rgba(frame_img, w, h)
-        mip_bytes.extend(encode_banner_rgba8_morton(level_img))
-        w //= 2
-        h //= 2
-    cgfx[0x5880 : 0x5880 + len(mip_bytes)] = mip_bytes
+def _resolve_3d_theme(system: str = "gba", template: Optional[str] = None) -> TemplateTheme:
+    if template and template.lower() not in ("auto", ""):
+        tk = template.lower()
+        if tk in GENRE_TEMPLATES:
+            return GENRE_TEMPLATES[tk]
+        if tk in CONSOLE_TEMPLATE_OVERRIDES:
+            return CONSOLE_TEMPLATE_OVERRIDES[tk]
+    sk = (system or "gba").lower()
+    if sk != "gba" and sk in CONSOLE_TEMPLATE_OVERRIDES:
+        return CONSOLE_TEMPLATE_OVERRIDES[sk]
+    return GENRE_TEMPLATES["classic"]
 
-    # 2. Decode COMMON2 (256x64 LA8 at 0x1AD80)
+
+_SNES_LOCALE_SLOTS: Tuple[bytes, ...] = (
+    b"EUR_EN",
+    b"EUR_FR",
+    b"EUR_GE",
+    b"EUR_IT",
+    b"EUR_SP",
+    b"EUR_DU",
+    b"EUR_PO",
+    b"EUR_RU",
+    b"JPN_JP",
+    b"USA_EN",
+    b"USA_FR",
+    b"USA_SP",
+    b"USA_PO",
+)
+
+
+def _patch_title_plate_la8(
+    cgfx: bytearray,
+    offset: int,
+    short_title: str,
+    subtitle: str,
+    is_nds: bool = False,
+) -> None:
+    """
+    Decode a 256x64 PICA200 LA8 Virtual Console title plate at `offset`, erase its right-side
+    title region (`x=94..247, y=4..59`), optionally customize the left emblem for `NDS`,
+    render `short_title` and `subtitle`, and write the Morton-encoded LA8 bytes back in place.
+    """
     plate_img = RGBAImage(256, 64)
-    pos = 0x1AD80
+    pos = offset
     for ty in range(0, 64, 8):
         for tx in range(0, 256, 8):
             for x, y in _MORTON_XY:
@@ -434,14 +533,28 @@ def build_3d_vc_cgfx(
                 plate_img.pixels[(ty + y) * 256 + (tx + x)] = (lum, lum, lum, a)
                 pos += 2
 
-    # Erase text region (x=94..247, y=4..59) with plate's vertical gradient at x=96
+    # Erase text region (x=94..247, y=4..59) with plate's clean vertical gradient at x=93
     for y in range(4, 60):
-        bg = plate_img.pixels[y * 256 + 96]
+        bg = plate_img.pixels[y * 256 + 93]
         for x in range(94, 248):
             plate_img.pixels[y * 256 + x] = bg
 
-    # Render title and subtitle centered in x=96..246 (center x=171, max width=148)
-    clean_title = short_title.strip() or "GBA Game"
+    if is_nds:
+        # Replace left-side GBA emblem (x=10..92, y=6..57) with Nintendo DS Dual-Screen icon & text
+        for y in range(6, 58):
+            bg = plate_img.pixels[y * 256 + 93]
+            for x in range(10, 93):
+                plate_img.pixels[y * 256 + x] = bg
+        # Draw dual-screen clamshell icon on left (x=16..38, y=14..48)
+        fill_rect(plate_img, 16, 13, 24, 15, (55, 55, 55, 255))
+        fill_rect(plate_img, 18, 15, 20, 11, (225, 225, 225, 255))
+        fill_rect(plate_img, 15, 29, 26, 3, (90, 90, 90, 255))
+        fill_rect(plate_img, 16, 33, 24, 15, (55, 55, 55, 255))
+        fill_rect(plate_img, 18, 35, 20, 11, (205, 205, 205, 255))
+        draw_text(plate_img, "NINTENDO", 44, 18, color=(45, 45, 45, 255), scale=1, shadow_color=None, max_width=48)
+        draw_text(plate_img, "DS", 54, 31, color=(35, 35, 35, 255), scale=2, shadow_color=None, max_width=36)
+
+    clean_title = short_title.strip() or "Virtual Console"
     if len(clean_title) <= 12:
         t_w = len(clean_title) * 12
         draw_text(
@@ -482,8 +595,272 @@ def build_3d_vc_cgfx(
         )
 
     plate_bytes = encode_la8_morton(plate_img)
-    cgfx[0x1AD80 : 0x1AD80 + len(plate_bytes)] = plate_bytes
-    return bytes(cgfx)
+    cgfx[offset : offset + len(plate_bytes)] = plate_bytes
+
+
+def _patch_rgba8_screen_mipmaps(
+    cgfx: bytearray,
+    offset: int,
+    frame_img: RGBAImage,
+    num_mips: int,
+) -> None:
+    """Encode `num_mips` mipmap levels (starting at 128x128) of `frame_img` as RGBA8 Morton."""
+    mip_bytes = bytearray()
+    w, h = 128, 128
+    for _ in range(num_mips):
+        level_img = frame_img if (w == 128 and h == 128) else resize_rgba(frame_img, w, h)
+        mip_bytes.extend(encode_banner_rgba8_morton(level_img))
+        w //= 2
+        h //= 2
+    cgfx[offset : offset + len(mip_bytes)] = mip_bytes
+
+
+def _patch_rgb565_screen_mipmaps(
+    cgfx: bytearray,
+    offset: int,
+    frame_img: RGBAImage,
+    num_mips: int,
+) -> None:
+    """Encode `num_mips` mipmap levels (starting at 128x128) of `frame_img` as RGB565 Morton."""
+    mip_bytes = bytearray()
+    w, h = 128, 128
+    for _ in range(num_mips):
+        level_img = frame_img if (w == 128 and h == 128) else resize_rgba(frame_img, w, h)
+        mip_bytes.extend(encode_rgb565_morton_image(level_img))
+        w //= 2
+        h //= 2
+    cgfx[offset : offset + len(mip_bytes)] = mip_bytes
+
+
+def build_3d_vc_cgfx_pair(
+    screen_img: RGBAImage,
+    short_title: str = "GBA Virtual Console",
+    subtitle: str = "Nintendo",
+    cgfx_3d_lz11: Optional[bytes] = None,
+    system: str = "gba",
+    template: Optional[str] = None,
+) -> Tuple[bytes, Optional[bytes]]:
+    """
+    Build the platform-specific 3D Virtual Console CGFX pair `(cgfx0, cgfx1)`:
+      - `gba`: Authentic 3D Game Boy Advance (`AGB-001`) console model (customizable shell theme)
+      - `gb`: Authentic 3D Original Game Boy (`DMG-01`) console model with dot-matrix bezel
+      - `gbc`: Authentic 3D Game Boy Color (`CGB-001`) console model with GBC lens
+      - `nes`: Authentic 3D NES Front-Loader (`NES-001`) console + retro CRT TV set
+      - `snes`: Authentic 3D Super Nintendo (`SNS-001`) console + controller + CRT TV set
+      - `md`: Authentic 3D Sega Mega Drive / Genesis 16-BIT console + joypad + CRT TV set
+      - `nds`: Custom 3D Nintendo DS (`NTR-001`) Platinum Silver & Graphite dual-screen handheld
+    """
+    sys_key = (system or "gba").lower()
+
+    # --- Platform 1: Original Game Boy (DMG-01) ---
+    if sys_key == "gb" and cgfx_3d_lz11 is None:
+        raw0, _ = get_console_banner_cgfx("gb")
+        cgfx0 = bytearray(raw0)
+        # COMMON1 at 0x00B000 (128x128 RGBA8, 5 mips), inner screen box (24, 14)..(104, 86) -> 80x72
+        frame_img = decode_rgba8_morton_image(cgfx0, 128, 128, 0x00B000)
+        fit = resize_rgba(screen_img, 80, 72)
+        for y in range(72):
+            for x in range(80):
+                sr, sg, sb, _ = fit.pixels[y * 80 + x]
+                frame_img.pixels[(14 + y) * 128 + (24 + x)] = (sr, sg, sb, 255)
+        _patch_rgba8_screen_mipmaps(cgfx0, 0x00B000, frame_img, num_mips=5)
+        # COMMON2 at 0x020500 (256x64 LA8)
+        _patch_title_plate_la8(cgfx0, 0x020500, short_title, subtitle)
+        return bytes(cgfx0), None
+
+    # --- Platform 2: Game Boy Color (CGB-001) ---
+    if sys_key == "gbc" and cgfx_3d_lz11 is None:
+        raw0, raw1 = get_console_banner_cgfx("gbc")
+        cgfx0 = bytearray(raw0)
+        cgfx1 = bytearray(raw1) if raw1 is not None else bytearray()
+        # COMMON1 at 0x010780 (128x128 RGBA8, 5 mips), inner screen box (24, 29)..(104, 101) -> 80x72
+        frame_img = decode_rgba8_morton_image(cgfx0, 128, 128, 0x010780)
+        fit = resize_rgba(screen_img, 80, 72)
+        for y in range(72):
+            for x in range(80):
+                sr, sg, sb, _ = fit.pixels[y * 80 + x]
+                frame_img.pixels[(29 + y) * 128 + (24 + x)] = (sr, sg, sb, 255)
+        _patch_rgba8_screen_mipmaps(cgfx0, 0x010780, frame_img, num_mips=5)
+        # COMMON2 in cgfx1 at 0x000180 (256x64 LA8)
+        if len(cgfx1) >= 0x8180:
+            _patch_title_plate_la8(cgfx1, 0x000180, short_title, subtitle)
+        return bytes(cgfx0), bytes(cgfx1) if cgfx1 else None
+
+    # --- Platform 3: Nintendo Entertainment System (NES-001 + CRT TV) ---
+    if sys_key == "nes" and cgfx_3d_lz11 is None:
+        raw0, raw1 = get_console_banner_cgfx("nes")
+        cgfx0 = bytearray(raw0)
+        cgfx1 = bytearray(raw1) if raw1 is not None else bytearray()
+        # COMMON1 at 0x00F180 (128x128 RGB565, 3 mips), inner CRT screen box (3, 13)..(125, 107) -> 122x94
+        frame_img = decode_rgb565_morton_image(cgfx0, 128, 128, 0x00F180)
+        fit = resize_rgba(screen_img, 122, 94)
+        for y in range(94):
+            for x in range(122):
+                sr, sg, sb, _ = fit.pixels[y * 122 + x]
+                frame_img.pixels[(13 + y) * 128 + (3 + x)] = (sr, sg, sb, 255)
+        _patch_rgb565_screen_mipmaps(cgfx0, 0x00F180, frame_img, num_mips=3)
+        # COMMON2 in cgfx1 at 0x000180 (256x64 LA8)
+        if len(cgfx1) >= 0x8180:
+            _patch_title_plate_la8(cgfx1, 0x000180, short_title, subtitle)
+        return bytes(cgfx0), bytes(cgfx1) if cgfx1 else None
+
+    # --- Platform 4: Super Nintendo (SNS-001 + Controller + CRT TV) ---
+    if sys_key == "snes" and cgfx_3d_lz11 is None:
+        raw0, raw1 = get_console_banner_cgfx("snes")
+        cgfx0 = bytearray(raw0)
+        cgfx1 = bytearray(raw1) if raw1 is not None else bytearray()
+        # COMMON1 at 0x009F00 (128x128 RGBA8, 3 mips), inner CRT screen box (4, 6)..(124, 107) -> 120x101
+        frame_img = decode_rgba8_morton_image(cgfx0, 128, 128, 0x009F00)
+        fit = resize_rgba(screen_img, 120, 101)
+        for y in range(101):
+            for x in range(120):
+                sr, sg, sb, _ = fit.pixels[y * 120 + x]
+                frame_img.pixels[(6 + y) * 128 + (4 + x)] = (sr, sg, sb, 255)
+        _patch_rgba8_screen_mipmaps(cgfx0, 0x009F00, frame_img, num_mips=3)
+        # USA_PO2 in cgfx1 at 0x00DE00 (256x64 LA8)
+        if len(cgfx1) >= 0x15E00:
+            _patch_title_plate_la8(cgfx1, 0x00DE00, short_title, subtitle)
+        return bytes(cgfx0), bytes(cgfx1) if cgfx1 else None
+
+    # --- Platform 5: Sega Mega Drive / Genesis 16-BIT + Joypad + CRT TV ---
+    if sys_key == "md" and cgfx_3d_lz11 is None:
+        raw0, _ = get_console_banner_cgfx("md")
+        cgfx0 = bytearray(raw0)
+        # COMMON1 at 0x024B00 (256x64 LA8 title plate)
+        _patch_title_plate_la8(cgfx0, 0x024B00, short_title, subtitle)
+        # COMMON2 at 0x02CB00 (128x128 RGB565, 1 mip), inner CRT screen box (3, 5)..(125, 105) -> 122x100
+        frame_img = decode_rgb565_morton_image(cgfx0, 128, 128, 0x02CB00)
+        fit = resize_rgba(screen_img, 122, 100)
+        for y in range(100):
+            for x in range(122):
+                sr, sg, sb, _ = fit.pixels[y * 122 + x]
+                frame_img.pixels[(5 + y) * 128 + (3 + x)] = (sr, sg, sb, 255)
+        _patch_rgb565_screen_mipmaps(cgfx0, 0x02CB00, frame_img, num_mips=1)
+        return bytes(cgfx0), None
+
+    # --- Platform 6 & 7: GBA (AGB-001) and NDS (Nintendo DS Dual-Screen Clamshell) ---
+    if cgfx_3d_lz11 is None:
+        cgfx_3d_lz11, _ = get_banner_3d_vc_cgfx_lz11()
+    cgfx = bytearray(decompress_lz11(cgfx_3d_lz11))
+    theme = _resolve_3d_theme(system=system, template=template)
+    is_nds = sys_key == "nds"
+
+    # 1. Decode COMMON1 (128x128 RGBA8 at 0x5880)
+    frame_img = decode_rgba8_morton_image(cgfx, 128, 128, 0x5880)
+
+    if is_nds:
+        # Platinum Silver outer shell + Matte Graphite dual-screen clamshell bezel
+        bm_r, bm_g, bm_b = (196, 204, 216)
+    else:
+        bm_r, bm_g, bm_b = theme.bezel_main
+
+    for y in range(128):
+        shade = 1.08 - 0.16 * (y / 127.0)
+        sr_bezel = max(0, min(255, int(bm_r * shade)))
+        sg_bezel = max(0, min(255, int(bm_g * shade)))
+        sb_bezel = max(0, min(255, int(bm_b * shade)))
+        for x in range(128):
+            orig_r, orig_g, orig_b, orig_a = frame_img.pixels[y * 128 + x]
+            if orig_a > 0 and (abs(orig_r - 126) + abs(orig_g - 100) + abs(orig_b - 197) <= 65):
+                frame_img.pixels[y * 128 + x] = (sr_bezel, sg_bezel, sb_bezel, orig_a)
+
+    if is_nds:
+        # Draw Nintendo DS Clamshell Hinge Bar & Dual-Screen Surround inside (4, 18)..(124, 108)
+        fill_rect(frame_img, 4, 19, 120, 6, (44, 48, 58, 255))
+        fill_rect(frame_img, 4, 20, 120, 2, (140, 150, 165, 255))
+        # Cylindrical hinge barrel ribs + microphone hole
+        for hx in (18, 22, 104, 108):
+            fill_rect(frame_img, hx, 19, 2, 6, (28, 32, 40, 255))
+        fill_rect(frame_img, 63, 21, 2, 3, (15, 18, 24, 255))
+        # Twin NDS status LEDs on right hinge (Green Power + Amber Wi-Fi)
+        fill_rect(frame_img, 114, 20, 3, 4, (50, 235, 95, 255))
+        fill_rect(frame_img, 119, 20, 3, 4, (255, 175, 40, 255))
+        # Dark graphite touchscreen/display bezel surround inside V=[0.14..0.85] (y=19..106)
+        fill_rect(frame_img, 5, 24, 118, 81, (32, 36, 44, 255))
+        fit = resize_rgba(screen_img, 112, 66)
+        for y in range(66):
+            for x in range(112):
+                sr, sg, sb, _ = fit.pixels[y * 112 + x]
+                frame_img.pixels[(27 + y) * 128 + (8 + x)] = (sr, sg, sb, 255)
+        draw_border(frame_img, 7, 26, 114, 68, (80, 90, 108, 255), thickness=1)
+        # Bottom silver NINTENDO DS badge bar at y=95..103
+        draw_text(
+            frame_img,
+            "NINTENDO DS",
+            31,
+            96,
+            color=(225, 234, 248, 255),
+            scale=1,
+            shadow_color=None,
+            max_width=68,
+        )
+    else:
+        # Composite screen_img into inner GBA lens (6, 24) .. (122, 104) with bottom GAME BOY ADVANCE lens bar
+        fill_rect(frame_img, 5, 24, 118, 80, (34, 38, 48, 255))
+        fit = resize_rgba(screen_img, 112, 68)
+        for y in range(68):
+            for x in range(112):
+                sr, sg, sb, _ = fit.pixels[y * 112 + x]
+                frame_img.pixels[(26 + y) * 128 + (8 + x)] = (sr, sg, sb, 255)
+        draw_border(frame_img, 7, 25, 114, 70, (64, 72, 90, 255), thickness=1)
+        draw_text(
+            frame_img,
+            "GAME BOY ADVANCE",
+            16,
+            96,
+            color=(210, 218, 236, 255),
+            scale=1,
+            shadow_color=None,
+            max_width=96,
+        )
+        # Inner dark bezel rim + glowing power LED on right/left bezel
+        draw_border(frame_img, 5, 24, 118, 80, (*theme.bezel_dark, 255), thickness=1)
+        fill_rect(frame_img, 2, 58, 3, 4, theme.bezel_led)
+        fill_rect(frame_img, 3, 59, 1, 2, (255, 255, 255, 230))
+
+    _patch_rgba8_screen_mipmaps(cgfx, 0x5880, frame_img, num_mips=5)
+
+    # 1b. Update COMMON3 (128x128 ETC1 at 0x22D80) so the 3D console shell matches the platform/theme
+    common3_off = 0x22D80
+    if common3_off + 0x2000 <= len(cgfx):
+        if is_nds:
+            cgfx[common3_off : common3_off + 0x2000] = _encode_etc1_common3_body(
+                dark_col=(34, 38, 46),
+                trim_col=(75, 175, 245),
+                body_col=(196, 204, 216),
+            )
+        else:
+            cgfx[common3_off : common3_off + 0x2000] = _encode_etc1_common3_body(
+                dark_col=theme.bezel_dark,
+                trim_col=theme.accent_primary[:3],
+                body_col=theme.bezel_main,
+            )
+
+    # 2. Patch COMMON2 (256x64 LA8 at 0x1AD80)
+    _patch_title_plate_la8(cgfx, 0x1AD80, short_title, subtitle, is_nds=is_nds)
+    return bytes(cgfx), None
+
+
+def build_3d_vc_cgfx(
+    screen_img: RGBAImage,
+    short_title: str = "GBA Virtual Console",
+    subtitle: str = "Nintendo",
+    cgfx_3d_lz11: Optional[bytes] = None,
+    system: str = "gba",
+    template: Optional[str] = None,
+) -> bytes:
+    """
+    Build the primary uncompressed 3D Virtual Console CGFX (`cgfx0`) for `system`.
+    """
+    cgfx0, _ = build_3d_vc_cgfx_pair(
+        screen_img=screen_img,
+        short_title=short_title,
+        subtitle=subtitle,
+        cgfx_3d_lz11=cgfx_3d_lz11,
+        system=system,
+        template=template,
+    )
+    return cgfx0
 
 
 def build_cbmd_banner(
@@ -495,19 +872,26 @@ def build_cbmd_banner(
     short_title: str = "GBA Virtual Console",
     subtitle: str = "Nintendo",
     system: str = "gba",
+    template: Optional[str] = None,
 ) -> bytes:
     """
     Build a 3DS ExeFS `banner` (CBMD container):
-      - If `banner_style in ("vc", "3d", "vc3d")`, uses the authentic 3D Virtual Console CGFX.
+      - If `banner_style in ("vc", "3d", "vc3d")`, uses the platform-specific 3D Virtual Console CGFX
+        (`gba`, `gb`, `gbc`, `nes`, `snes`, `md`, `nds`), populating `CBMD` pointer slots `0` and `1..13`
+        as required by each console's 3D scene structure.
       - Otherwise (or for `banner_style == "2d"`), uses `bannertool`'s 0x1580-byte CGFX header
         with a 256x128 RGBA4 Morton texture (`0x11580` bytes total).
     """
+    sys_key = (system or "gba").lower()
+    cgfx1_raw: Optional[bytes] = None
     if banner_style in ("vc", "3d", "vc3d"):
         src_screen = screen_img if screen_img is not None else banner_img
-        cgfx_raw = build_3d_vc_cgfx(
+        cgfx_raw, cgfx1_raw = build_3d_vc_cgfx_pair(
             screen_img=src_screen,
             short_title=short_title,
             subtitle=subtitle,
+            system=system,
+            template=template,
         )
     else:
         if cgfx_header is None:
@@ -519,7 +903,7 @@ def build_cbmd_banner(
             morton_tex = encode_banner_rgba8_morton(banner_img)
             cgfx_raw = cgfx_header + morton_tex
 
-    comp_cgfx = compress_lz11(cgfx_raw)
+    comp_cgfx0 = compress_lz11(cgfx_raw)
 
     if bcwav_bytes is None:
         bcwav_bytes = build_gba_chime_bcwav(system=system)
@@ -527,9 +911,67 @@ def build_cbmd_banner(
     cbmd_hdr = bytearray(0x88)
     cbmd_hdr[0x00:0x04] = b"CBMD"
     struct.pack_into("<I", cbmd_hdr, 0x04, 0x00000000)
-    struct.pack_into("<I", cbmd_hdr, 0x08, 0x00000088)  # Common CGFX offset = 0x88
+    struct.pack_into("<I", cbmd_hdr, 0x08, 0x00000088)  # ptr[0] = 0x88
 
-    body = bytearray(cbmd_hdr + comp_cgfx)
+    body = bytearray(cbmd_hdr + comp_cgfx0)
+
+    if cgfx1_raw is not None:
+        if sys_key == "snes" and len(cgfx1_raw) >= 0x3200:
+            # Compress once with 0x31f8..0x31fe forced as literal bytes so all 13 region/locale
+            # slots (EUR_EN .. USA_PO) can be patched in O(1) without re-compressing 13 times.
+            sentinel = b"Z9Q7X8"
+            cgfx1_patched = bytearray(cgfx1_raw)
+            cgfx1_patched[0x31F8:0x31FE] = sentinel
+            comp1_base = compress_lz11(bytes(cgfx1_patched), literal_range=(0x31F8, 0x31FE))
+            # Locate the 6 literal bytes of `sentinel` inside `comp1_base`
+            lit_positions: List[int] = []
+            # Walk LZ11 stream to find exact output offsets for decompressed 0x31F8..0x31FD
+            d_pos = 0
+            c_pos = 4 if (comp1_base[1] | comp1_base[2] | comp1_base[3]) != 0 else 8
+            decomp_len = len(cgfx1_patched)
+            while d_pos < decomp_len and c_pos < len(comp1_base):
+                flags = comp1_base[c_pos]
+                c_pos += 1
+                for bit in range(7, -1, -1):
+                    if d_pos >= decomp_len or c_pos >= len(comp1_base):
+                        break
+                    if (flags >> bit) & 1:
+                        b0 = comp1_base[c_pos]
+                        ind = b0 >> 4
+                        if ind == 0:
+                            b1 = comp1_base[c_pos + 1]
+                            length = (((b0 & 0x0F) << 4) | (b1 >> 4)) + 0x11
+                            c_pos += 3
+                        elif ind == 1:
+                            b1 = comp1_base[c_pos + 1]
+                            b2 = comp1_base[c_pos + 2]
+                            length = (((b0 & 0x0F) << 12) | (b1 << 4) | (b2 >> 4)) + 0x111
+                            c_pos += 4
+                        else:
+                            length = ind + 1
+                            c_pos += 2
+                        d_pos += length
+                    else:
+                        if 0x31F8 <= d_pos < 0x31FE:
+                            lit_positions.append(c_pos)
+                        c_pos += 1
+                        d_pos += 1
+
+            for slot_idx, locale_code in enumerate(_SNES_LOCALE_SLOTS, start=1):
+                slot_offset = len(body)
+                struct.pack_into("<I", body, 0x08 + slot_idx * 4, slot_offset)
+                slot_comp = bytearray(comp1_base)
+                for b_idx, out_pos in enumerate(lit_positions):
+                    slot_comp[out_pos] = locale_code[b_idx]
+                body.extend(slot_comp)
+        else:
+            # GBC & NES: all 13 locale pointers point to the single compressed cgfx1 block
+            comp_cgfx1 = compress_lz11(cgfx1_raw)
+            slot_offset = len(body)
+            for slot_idx in range(1, 14):
+                struct.pack_into("<I", body, 0x08 + slot_idx * 4, slot_offset)
+            body.extend(comp_cgfx1)
+
     while len(body) % 0x10 != 0:
         body.append(0)
     cwav_offset = len(body)

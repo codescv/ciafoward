@@ -236,6 +236,30 @@ def get_console_template(system: str) -> Dict[str, Any]:
     }
 
 
+def get_console_banner_cgfx(system: str) -> Tuple[bytes, Optional[bytes]]:
+    """
+    Return the authentic 3D Virtual Console CGFX templates `(cgfx0, cgfx1)` for `system`:
+      - `gba`, `nds`: `(decompress_lz11(cgfx_3d_vc_lz11), None)`
+      - `gb`, `md`: `(banner_cgfx0, None)`
+      - `gbc`, `nes`, `snes`: `(banner_cgfx0, banner_cgfx1)`
+    """
+    sys_key = (system or "gba").lower()
+    if sys_key in ("gb", "gbc", "nes", "snes", "md"):
+        manifest, body = _load_console_bundle()
+        sys_info = manifest.get("systems", {}).get(sys_key, {})
+        extra = sys_info.get("extra", {})
+        blobs = manifest["blobs"]
+        if "banner_cgfx0" in extra:
+            off0, len0 = blobs[extra["banner_cgfx0"]]
+            cgfx0 = body[off0 : off0 + len0]
+            cgfx1: Optional[bytes] = None
+            if "banner_cgfx1" in extra:
+                off1, len1 = blobs[extra["banner_cgfx1"]]
+                cgfx1 = body[off1 : off1 + len1]
+            return cgfx0, cgfx1
+    raise ValueError(f"No dedicated console banner CGFX for system '{system}'")
+
+
 def build_console_exheader(
     system: str,
     title_id: int,

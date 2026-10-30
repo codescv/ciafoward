@@ -32,7 +32,18 @@
 - **自动下载多平台封面、标题画面与 3D Virtual Console 横幅**：
   - 根据平台类型、ROM `CRC32`、游戏编号及文件名，自动查询对应平台的 **Libretro No-Intro 数据库**（GBA / GB / GBC / NES / SNES / Mega Drive），获取规范名称、发行商、发行年份与区域。
   - 自动从 Libretro Thumbnail CDN 下载对应平台的 **游戏封面 (`Named_Boxarts`)** 与 **标题画面 (`Named_Titles`)** 并本地缓存。
-  - 默认生成 **3D Virtual Console 上屏预览 (`CBMD`)**（含游戏画面贴图、动态双行标题铭牌与各平台专属开机音效 `BCWAV`），以及无黑格失真的 PICA200 Morton Z-Order `SMDH` 桌面图标（`48x48` & `24x24`）。
+  - 默认生成 **7 大平台各自专属的 3DS 上屏 3D 游戏机模型 (`CBMD` -> `CGFX`)**（`GBA` 靛蓝掌机、`GB` 初代灰白砖头机、`GBC` 原子紫掌机、`NES` 美版主机+复古 CRT 电视、`SNES` 超任主机+手柄+CRT 电视、`MD` 世嘉 16-BIT 主机+三键手柄+CRT 电视、`NDS` 双屏折叠转轴掌机；含动态双行标题铭牌与各平台专属开机音效 `BCWAV`），以及无黑格失真的 PICA200 Morton Z-Order `SMDH` 桌面图标（`48x48` & `24x24`）。
+- **智能游戏类型识别与 9 套 GBA 专属视觉模版 (`--template`)**：
+  - 自动根据 GBA 游戏编号前缀与游戏标题识别所属游戏类型，自动套用对应的专属配色、背景底纹、像素徽章、定制边框与 3D 掌机外壳颜色：
+    - `rpg`（角色扮演：皇家紫金星辰 + 圣剑盾徽，如《宝可梦》《黄金太阳》《最终幻想》《地球冒险》）
+    - `slg`（策略战棋：绯红金甲战旗 + 战棋网格与王冠盾徽，如《火焰之纹章》《高级战争》《皇家骑士团》）
+    - `act`（横版动作闯关：电光蓝斜向疾速流线 + 无敌星徽章，如《超级马力欧》《星之卡比》《洛克人 Zero》）
+    - `arpg`（动作探索 / 恶魔城银河城：暗夜哥特酒红 + 绯月十字架，如《恶魔城》《密特罗德》《洛克人 EXE》）
+    - `avg`（文字解谜 / 塞尔达冒险：秘林祖母绿 + 黄金三角徽章，如《塞尔达传说：缩小帽》《逆转裁判》《牧场物语》）
+    - `ftg`（热血格斗：烈焰红橙斜向气浪 + 烈火冲击波，如《街头霸王》《拳皇 EX》《罪恶装备》）
+    - `rac`（极速赛车：沥青碳黑红白赛道 + 黑白方格旗，如《马力欧卡丁车》《F-Zero》）
+    - `puz`（益智音乐派对：霓虹波普多彩按键 + 俄罗斯方块徽章，如《瓦力欧制造》《节奏天国》《噗哟噗哟》）
+    - `classic`（经典复古掌机：GBA 经典靛蓝扫描线 + 像素 GBA 掌机徽章）
 - **模拟器存档转换与导入 (`ciafoward save`)**：
   - 支持将 mGBA (`.sav`)、RetroArch (`.srm`)、VBA (`.sav`) 存档一键转换为 3DS `AGB_FIRM` 精确硬件尺寸（自动剥离 RTC 尾部或 RetroArch 128KB 冗余填充，支持 EEPROM 8 字节字节序翻转），并附带完整的 **GodMode9** 注入指引。
 - **纯 Python 跨平台零外部工具依赖**：
@@ -155,8 +166,9 @@ ciafoward save game.gba vba_eeprom.sav -o 3ds_eeprom.sav --swap-eeprom
 | `--publisher` | 自定义发行商名称（例如 `Nintendo`） |
 | `--year` | 自定义发行年份（例如 `2001`） |
 | `--cover` | 自定义封面图片路径 (`PNG`/`JPG`) |
-| `--title-screen` | 自定义游戏标题画面路径 (`PNG`/`JPG`，用于 3D GBA 模型屏幕贴图) |
-| `--banner-style` | `vc`（默认，3D GBA Virtual Console 模型）、`2d`（2D 封面+铭牌卡片）或 `full`（2D 全屏封面） |
+| `--title-screen` | 自定义游戏标题画面路径 (`PNG`/`JPG`，用于 3D 游戏机屏幕贴图) |
+| `--banner-style` | `vc`（默认，各平台专属 3D 游戏机模型）、`2d`（2D 封面+铭牌卡片）或 `full`（2D 全屏封面） |
+| `--template` | 视觉模版主题：`auto`（默认按所属平台/游戏类型自动匹配）、`gb`、`gbc`、`nes`、`snes`、`md`、`nds`、`rpg`、`slg`、`act`、`arpg`、`avg`、`ftg`、`rac`、`puz`、`classic` |
 | `--save-type` | `auto`（默认）、`sram`、`flash512`、`flash1m`、`eeprom4k`、`eeprom64k`、`none` |
 | `--rtc` / `--no-rtc` | 强制开启或关闭实时时钟 (Seiko S-3511A RTC) |
 | `--title-id` | 自定义 16 位 UniqueID（如 `0x81234`）或完整 64 位 TitleID |

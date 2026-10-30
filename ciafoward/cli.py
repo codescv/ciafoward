@@ -85,7 +85,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--banner-style",
         choices=["vc", "2d", "full"],
         default="vc",
-        help="3DS 上屏横幅样式: 'vc' (默认 3D GBA Virtual Console 模型)、'2d' (2D 封面+铭牌卡片) 或 'full' (2D 全屏封面)",
+        help="3DS 上屏横幅样式: 'vc' (默认 3D Virtual Console 模型)、'2d' (2D 封面+铭牌卡片) 或 'full' (2D 全屏封面)",
+    )
+    build_p.add_argument(
+        "--template",
+        choices=[
+            "auto",
+            "rpg",
+            "slg",
+            "act",
+            "arpg",
+            "avg",
+            "ftg",
+            "rac",
+            "puz",
+            "classic",
+        ],
+        default="auto",
+        help="视觉主题模版类型: auto (默认根据游戏自动匹配 RPG/SLG/ACT/ARPG/AVG/FTG/RAC/PUZ/CLASSIC)",
     )
     build_p.add_argument(
         "--save-type",
@@ -278,6 +295,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         custom_year=args.year,
         custom_cover=args.cover,
         custom_title_screen=args.title_screen,
+        custom_genre=getattr(args, "template", "auto"),
         download_artwork=not args.offline,
         use_online_db=not args.offline,
     )
@@ -285,13 +303,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not args.json:
         print(f"      游戏名称     : {metadata.short_title}")
         print(f"      发行厂商     : {metadata.publisher} ({metadata.release_year})")
+        print(f"      视觉主题模版 : [{metadata.genre.upper()}] {metadata.genre_name}")
         print(f"      No-Intro 匹配: {metadata.canonical_name} [来源: {metadata.source}]")
         if metadata.boxart_path:
             print(f"      游戏封面图   : 已就绪 ({metadata.boxart_path})")
             if metadata.boxart_url:
                 print(f"                     来源: {metadata.boxart_url}")
         else:
-            print("      游戏封面图   : 未找到在线封面，将自动渲染 GBA Virtual Console 定制封面")
+            print(f"      游戏封面图   : 未找到在线封面，将自动渲染 [{metadata.genre_name}] 专属定制封面")
         if metadata.title_screen_path:
             print(f"      标题画面图   : 已就绪 ({metadata.title_screen_path})")
 

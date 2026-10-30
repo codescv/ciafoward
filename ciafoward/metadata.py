@@ -135,7 +135,243 @@ BUILTIN_GBA_CATALOG: Dict[str, Tuple[str, str, str, str]] = {
     "ARE": ("Mega Man Battle Network", "Capcom", "2001", "Mega Man Battle Network (USA)"),
     "AE2": ("Mega Man Battle Network 2", "Capcom", "2002", "Mega Man Battle Network 2 (USA)"),
     "U3I": ("Boktai: The Sun Is in Your Eyes", "Konami", "2003", "Boktai - The Sun Is in Your Eyes (USA)"),
+    "AZX": ("Street Fighter Alpha 3", "Capcom", "2002", "Street Fighter Alpha 3 (USA)"),
+    "ASF": ("Super Street Fighter II Turbo Revival", "Capcom", "2001", "Super Street Fighter II Turbo Revival (USA)"),
+    "BRI": ("Rhythm Tengoku", "Nintendo", "2006", "Rhythm Tengoku (Japan)"),
+    "A6T": ("Tactics Ogre: The Knight of Lodis", "Atlus", "2002", "Tactics Ogre - The Knight of Lodis (USA)"),
+    "AVS": ("Sword of Mana", "Square Enix", "2003", "Sword of Mana (USA, Australia)"),
+    "AGY": ("Phoenix Wright: Ace Attorney", "Capcom", "2001", "Gyakuten Saiban (Japan)"),
 }
+
+GENRE_LABELS: Dict[str, Tuple[str, str]] = {
+    "rpg": ("RPG", "奇幻角色扮演 (RPG)"),
+    "slg": ("SLG", "策略战棋 (SLG)"),
+    "act": ("ACT", "横版动作闯关 (ACT)"),
+    "arpg": ("ARPG", "银河城/动作RPG (ARPG)"),
+    "avg": ("AVG", "冒险探索/解谜 (AVG)"),
+    "ftg": ("FTG", "街机格斗对战 (FTG)"),
+    "rac": ("RAC", "极速赛车竞速 (RAC)"),
+    "puz": ("PUZ", "益智休闲/体育 (PUZ)"),
+    "classic": ("GBA", "经典主机原色 (CLASSIC)"),
+}
+
+GBA_GENRE_BY_PREFIX: Dict[str, str] = {
+    # SLG (Tactical / Strategy)
+    "AWR": "slg",
+    "B2W": "slg",
+    "AE7": "slg",
+    "BE8": "slg",
+    "AF6": "slg",
+    "AFX": "slg",
+    "A6T": "slg",
+    "A9O": "slg",
+    "A9B": "slg",
+    "B2R": "slg",
+    "B3R": "slg",
+    "A3W": "slg",
+    "AZT": "slg",
+    # RPG (Turn-Based & Fantasy JRPG)
+    "AXV": "rpg",
+    "AXP": "rpg",
+    "BPE": "rpg",
+    "BPR": "rpg",
+    "BPG": "rpg",
+    "B24": "rpg",
+    "AGS": "rpg",
+    "AGF": "rpg",
+    "A3U": "rpg",
+    "BZ4": "rpg",
+    "BZ5": "rpg",
+    "BZ6": "rpg",
+    "A88": "rpg",
+    "B8P": "rpg",
+    "ALR": "rpg",
+    "ATD": "rpg",
+    "BDQ": "rpg",
+    "B54": "rpg",
+    "B6P": "rpg",
+    "BYG": "rpg",
+    "AMH": "rpg",
+    # ARPG (Metroidvania & Action RPG)
+    "AMT": "arpg",
+    "BMX": "arpg",
+    "ACV": "arpg",
+    "A2C": "arpg",
+    "A2O": "arpg",
+    "ARE": "arpg",
+    "AE2": "arpg",
+    "A3X": "arpg",
+    "B4W": "arpg",
+    "B5W": "arpg",
+    "BR5": "arpg",
+    "BR6": "arpg",
+    "U3I": "arpg",
+    "U32": "arpg",
+    "U33": "arpg",
+    "AVS": "arpg",
+    "ASS": "arpg",
+    "AU2": "arpg",
+    "B8S": "arpg",
+    # AVG (Zelda / Adventure / Visual Novel)
+    "AZL": "avg",
+    "BZM": "avg",
+    "AGY": "avg",
+    "A2G": "avg",
+    "B3G": "avg",
+    "AHM": "avg",
+    "B8H": "avg",
+    "A4N": "avg",
+    "BFM": "avg",
+    # ACT (Platformer & Run-and-Gun Action)
+    "AMA": "act",
+    "A3A": "act",
+    "A2Y": "act",
+    "AX4": "act",
+    "A7K": "act",
+    "B8K": "act",
+    "AA2": "act",
+    "BKC": "act",
+    "B2D": "act",
+    "B3D": "act",
+    "AZU": "act",
+    "A2N": "act",
+    "B3S": "act",
+    "AZ2": "act",
+    "A6Z": "act",
+    "BZ3": "act",
+    "B4Z": "act",
+    "B6M": "act",
+    "ANJ": "act",
+    "B3T": "act",
+    "AGJ": "act",
+    "ACT": "act",
+    "ASL": "act",
+    "BKL": "act",
+    # FTG (Fighting & Beat 'em Up)
+    "AZX": "ftg",
+    "ASF": "ftg",
+    "AKO": "ftg",
+    "B2K": "ftg",
+    "ATK": "ftg",
+    "AGG": "ftg",
+    "BDZ": "ftg",
+    "B3B": "ftg",
+    "ANR": "ftg",
+    "AFG": "ftg",
+    # RAC (Racing)
+    "AMK": "rac",
+    "A5F": "rac",
+    "BFZ": "rac",
+    "BFT": "rac",
+    "AGT": "rac",
+    "AKW": "rac",
+    "BNF": "rac",
+    # PUZ (Puzzle, Rhythm, Party & Sports)
+    "AWZ": "puz",
+    "RZW": "puz",
+    "BRI": "puz",
+    "B8M": "puz",
+    "ACR": "puz",
+    "APY": "puz",
+    "AT3": "puz",
+    "BMG": "puz",
+    "BMT": "puz",
+    "AFB": "puz",
+}
+
+
+def detect_game_genre(
+    game_code: str = "",
+    title: str = "",
+    canonical_name: str = "",
+    internal_title: str = "",
+    override_genre: Optional[str] = None,
+) -> str:
+    """
+    Automatically classify a game into one of the visual template genres:
+    `("rpg", "slg", "act", "arpg", "avg", "ftg", "rac", "puz", "classic")`.
+    """
+    if override_genre and override_genre.lower() not in ("auto", ""):
+        g = override_genre.lower()
+        if g in GENRE_LABELS:
+            return g
+
+    prefix3 = (game_code or "")[:3].upper()
+    if prefix3 in GBA_GENRE_BY_PREFIX:
+        return GBA_GENRE_BY_PREFIX[prefix3]
+
+    combined = f"{title} {canonical_name} {internal_title}".lower()
+
+    # Check keyword patterns in priority order
+    slg_kw = (
+        "advance wars", "fire emblem", "tactics", "super robot", "srw",
+        "ogre", "yu-gi-oh", "yugioh", "sangokushi", "nobunaga", "conquest",
+        "shining force", "rebelstar", "onimus", "sd gundam", "wars", "strategy",
+    )
+    if any(k in combined for k in slg_kw):
+        return "slg"
+
+    arpg_kw = (
+        "castlevania", "metroid", "battle network", "rockman exe", "boktai",
+        "sword of mana", "seiken densetsu", "shining soul", "kingdom hearts",
+        "sigma star", "baldur", "diablo", "summon night",
+    )
+    if any(k in combined for k in arpg_kw):
+        return "arpg"
+
+    avg_kw = (
+        "zelda", "minish cap", "link to the past", "link's awakening",
+        "ace attorney", "gyakuten saiban", "harvest moon", "mineral town",
+        "hamtaro", "detective", "broken sword", "another code", "hotel dusk",
+    )
+    if any(k in combined for k in avg_kw):
+        return "avg"
+
+    ftg_kw = (
+        "street fighter", "king of fighters", "kof", "tekken", "guilty gear",
+        "dragon ball", "mortal kombat", "final fight", "double dragon",
+        "sonic battle", "brawler", "fighting", "fighter", "gekido", "hajime no ippo",
+    )
+    if any(k in combined for k in ftg_kw):
+        return "ftg"
+
+    rac_kw = (
+        "mario kart", "kart", "f-zero", "f zero", "gt advance", "krazy racers",
+        "need for speed", "v-rally", "top gear", "crazy taxi", "motogp",
+        "racing", "racer", "rally", "out run", "outrun", "ridge racer",
+    )
+    if any(k in combined for k in rac_kw):
+        return "rac"
+
+    puz_kw = (
+        "warioware", "wario ware", "rhythm", "puyo", "tetris", "chuchu",
+        "mario party", "puzzle", "dr. mario", "kururin", "monkey ball",
+        "mario golf", "mario tennis", "power tennis", "advance tour",
+        "pinball", "bomberman", "dodgeball", "nekketsu", "fifa", "madden",
+        "tony hawk", "fire pro", "baseball", "basketball", "soccer", "bowling",
+    )
+    if any(k in combined for k in puz_kw):
+        return "puz"
+
+    rpg_kw = (
+        "pokemon", "pokémon", "golden sun", "final fantasy", "mother ",
+        "earthbound", "mario & luigi", "breath of fire", "dragon quest",
+        "dragon warrior", "tales of", "lufia", "lunar", "riviera", "yggdra",
+        "magical vacation", "oriental blue", "shin megami", "demikids",
+        "medabots", "robopon", "phantasy star", "chrono", "fire emblem",
+    )
+    if any(k in combined for k in rpg_kw):
+        return "rpg"
+
+    act_kw = (
+        "mario", "sonic", "kirby", "wario land", "donkey kong", "mega man",
+        "rockman", "astro boy", "ninja", "contra", "metal slug", "gunstar",
+        "klonoa", "rayman", "crash", "spyro", "starfy", "stafy", "castlevania",
+    )
+    if any(k in combined for k in act_kw):
+        return "act"
+
+    return "classic"
 
 # Characters that Libretro Thumbnails replaces with '_' in PNG filenames
 LIBRETRO_SANITIZE_REGEX = re.compile(r'[&*/:`<>?\\|"]')
@@ -177,6 +413,18 @@ class GameMetadata:
     source: str = "header"
     system: str = "gba"
     system_name: str = "Game Boy Advance"
+    genre: str = "auto"
+    genre_name: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.genre or self.genre == "auto":
+            self.genre = detect_game_genre(
+                game_code=self.game_code,
+                title=self.short_title,
+                canonical_name=self.canonical_name,
+            )
+        if not self.genre_name:
+            self.genre_name = GENRE_LABELS.get(self.genre, GENRE_LABELS["classic"])[1]
 
 
 def _get_libretro_urls_for_system(system: str) -> Tuple[List[str], str, str, str]:
@@ -493,6 +741,7 @@ def resolve_game_metadata(
     custom_year: Optional[str] = None,
     custom_cover: Optional[str] = None,
     custom_title_screen: Optional[str] = None,
+    custom_genre: Optional[str] = None,
     download_artwork: bool = True,
     use_online_db: bool = True,
     timeout: float = 10.0,
@@ -617,6 +866,14 @@ def resolve_game_metadata(
                     candidates, "Named_Snaps", cache_dir=cache_dir, timeout=timeout, system=sys_key
                 )
 
+    detected_genre = detect_game_genre(
+        game_code=rom_info.game_code,
+        title=display_title,
+        canonical_name=canonical_name,
+        internal_title=rom_info.internal_title,
+        override_genre=custom_genre,
+    )
+
     return GameMetadata(
         short_title=short_title,
         long_title=long_title,
@@ -632,4 +889,6 @@ def resolve_game_metadata(
         source=source,
         system=sys_key,
         system_name=str(spec["name"]),
+        genre=detected_genre,
+        genre_name=GENRE_LABELS.get(detected_genre, GENRE_LABELS["classic"])[1],
     )

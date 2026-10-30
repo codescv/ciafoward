@@ -475,6 +475,7 @@ def package_gba_to_cia(
     icon_24, icon_48 = compose_vc_icons(
         metadata,
         source_image=nds_icon if (nds_icon is not None and not has_ext_art) else None,
+        template=getattr(metadata, "genre", None),
     )
     smdh_bytes = build_smdh(
         short_title=metadata.short_title,
@@ -486,7 +487,11 @@ def package_gba_to_cia(
     )
 
     # 2. Build CBMD Banner
-    banner_img = compose_vc_banner_256x128(metadata, banner_style=banner_style)
+    banner_img = compose_vc_banner_256x128(
+        metadata,
+        banner_style=banner_style,
+        template=getattr(metadata, "genre", None),
+    )
     screen_img: Optional[RGBAImage] = None
     if metadata.title_screen_path and Path(metadata.title_screen_path).is_file():
         try:
@@ -499,7 +504,12 @@ def package_gba_to_cia(
         except Exception:
             screen_img = None
     if screen_img is None:
-        screen_img = generate_stylized_cover(metadata, 240, 160)
+        screen_img = generate_stylized_cover(
+            metadata,
+            240,
+            160,
+            template=getattr(metadata, "genre", None),
+        )
 
     subtitle = f"Released: {metadata.release_year}" if metadata.release_year else metadata.publisher
     cgfx_hdr, cgfx_src = get_banner_cgfx_header(download=download_templates)
@@ -515,6 +525,7 @@ def package_gba_to_cia(
         short_title=metadata.short_title,
         subtitle=subtitle,
         system=rom_info.system,
+        template=getattr(metadata, "genre", None),
     )
 
     # Optional preview PNG export

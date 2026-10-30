@@ -42,13 +42,17 @@ from ciafoward.gba import (
     parse_gba_rom,
 )
 from ciafoward.graphics import (
+    CONSOLE_TEMPLATE_OVERRIDES,
+    GENRE_TEMPLATES,
     RGBAImage,
     compose_vc_banner_256x128,
     compose_vc_icons,
     decode_png_bytes,
     encode_png_bytes,
+    generate_stylized_cover,
+    resolve_template_theme,
 )
-from ciafoward.metadata import resolve_game_metadata
+from ciafoward.metadata import GameMetadata, detect_game_genre, resolve_game_metadata
 from ciafoward.romfs import build_romfs, extract_romfs, verify_romfs_ivfc
 from ciafoward.save_tool import convert_save_for_3ds, swap_eeprom_8byte_blocks
 from ciafoward.templates import get_console_template, get_romfs_bytes
@@ -447,6 +451,107 @@ class TestCiaFoward(unittest.TestCase):
             self.assertEqual(rep2["nds_target_path"], "sd:/roms/nds/custom_nsmb.nds")
             self.assertTrue(rep2["nds_rom_embedded"])
             self.assertEqual(rep2["embedded_gba"].game_code, "A2DE")
+
+    def test_genre_detection_and_templates(self) -> None:
+        # 1. Verify GBA game genre auto-detection by game code prefix & title keywords
+        expected_genres = [
+            ("BPEE", "Pokemon Emerald Version", "rpg"),
+            ("BE8E", "Fire Emblem: The Sacred Stones", "slg"),
+            ("AWRE", "Advance Wars", "slg"),
+            ("BMXE", "Metroid: Zero Mission", "arpg"),
+            ("B8KE", "Kirby & The Amazing Mirror", "act"),
+            ("A2CE", "Castlevania: Aria of Sorrow", "arpg"),
+            ("BZME", "The Legend of Zelda: The Minish Cap", "avg"),
+            ("BGYJ", "Gyakuten Saiban", "avg"),
+            ("AX2E", "Super Street Fighter II Turbo Revival", "ftg"),
+            ("AMKE", "Mario Kart: Super Circuit", "rac"),
+            ("AZWE", "WarioWare, Inc.: Mega Microgame$!", "puz"),
+            ("AX4E", "Super Mario Advance 4", "act"),
+            ("ZZZZ", "Unknown Retro Title", "classic"),
+        ]
+        for code, title, exp_genre in expected_genres:
+            detected = detect_game_genre(game_code=code, title=title)
+            self.assertEqual(detected, exp_genre, f"Failed genre detection for {code} ({title})")
+
+        # 2. Verify all 9 GBA genre templates render distinct covers, banners, icons, and 3D CGFX
+        cover_signatures = set()
+        for genre_key in GENRE_TEMPLATES:
+            meta = GameMetadata(
+                short_title=f"Sample {genre_key.upper()}",
+                long_title=f"Sample {genre_key.upper()} (2004)",
+                publisher="Nintendo",
+                release_year="2004",
+                canonical_name=f"Sample {genre_key.upper()} (USA)",
+                game_code="BPEE",
+                region="USA",
+                system="gba",
+                genre=genre_key,
+            )
+            theme = resolve_template_theme(meta)
+            self.assertEqual(theme.key, genre_key)
+            cover = generate_stylized_cover(meta)
+            self.assertEqual((cover.width, cover.height), (240, 160))
+            cover_signatures.add(hashlib.md5(encode_png_bytes(cover)).hexdigest())
+
+            banner = compose_vc_banner_256x128(meta)
+            self.assertEqual((banner.width, banner.height), (256, 128))
+            icon24, icon48 = compose_vc_icons(meta)
+            self.assertEqual((icon24.width, icon24.height), (24, 24))
+            self.assertEqual((icon48.width, icon48.height), (48, 48))
+
+        self.assertEqual(len(cover_signatures), len(GENRE_TEMPLATES))
+
+        # 3. Verify console-specific templates and distinct 3D Console CBMD/CGFX models for GBA, GB, GBC, NES, SNES, MD, NDS
+        from ciafoward.banner import build_3d_vc_cgfx_pair, build_cbmd_banner
+
+        cgfx0_hashes = set()
+        for sys_key in ("gba", "gb", "gbc", "nes", "snes", "md", "nds"):
+            meta = GameMetadata(
+                short_title=f"Console {sys_key.upper()}",
+                long_title=f"Console {sys_key.upper()}",
+                publisher="Nintendo",
+                release_year="1995",
+                canonical_name=f"Console {sys_key.upper()}",
+                game_code="TEST",
+                region="USA",
+                system=sys_key,
+            )
+            theme = resolve_template_theme(meta)
+            if sys_key != "gba":
+                self.assertEqual(theme.key, sys_key)
+            cover = generate_stylized_cover(meta)
+            cgfx0, cgfx1 = build_3d_vc_cgfx_pair(
+                screen_img=cover,
+                short_title=meta.short_title,
+                subtitle="Released: 1995",
+                system=sys_key,
+            )
+            self.assertEqual(cgfx0[:4], b"CGFX")
+            cgfx0_hashes.add(hashlib.md5(cgfx0).hexdigest())
+            if sys_key in ("gbc", "nes", "snes"):
+                self.assertIsNotNone(cgfx1)
+                self.assertEqual(cgfx1[:4], b"CGFX")
+            else:
+                self.assertIsNone(cgfx1)
+
+            cbmd = build_cbmd_banner(
+                banner_img=compose_vc_banner_256x128(meta),
+                screen_img=cover,
+                short_title=meta.short_title,
+                subtitle="Released: 1995",
+                system=sys_key,
+            )
+            self.assertEqual(cbmd[:4], b"CBMD")
+            ptr0 = struct.unpack_from("<I", cbmd, 0x08)[0]
+            self.assertEqual(ptr0, 0x88)
+            self.assertEqual(decompress_lz11(cbmd[ptr0:])[:4], b"CGFX")
+            if sys_key in ("gbc", "nes", "snes"):
+                for slot in range(1, 14):
+                    ptr_s = struct.unpack_from("<I", cbmd, 0x08 + slot * 4)[0]
+                    self.assertGreater(ptr_s, 0x88)
+                    self.assertEqual(decompress_lz11(cbmd[ptr_s:])[:4], b"CGFX")
+
+        self.assertEqual(len(cgfx0_hashes), 7)
 
 
 if __name__ == "__main__":
